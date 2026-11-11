@@ -33,10 +33,22 @@ Step 6:  Define Message model (individual messages in a session):
             - session_id: String (ForeignKey → ChatSession.id)
             - role: String → "user" | "assistant"
             - content: Text (the message text)
-            - retrieved_chunks: JSON (store which chunks were used — for citation display)
+            - retrieved_chunks: JSON (store which chunks used — for citation display)
             - model_used: String (openai | groq — which LLM answered)
-            - latency_ms: Integer (how long it took)
+            - latency_ms: Integer (how long it took in ms)
             - created_at: DateTime
+
+            --- RAGAS Evaluation Fields (added to same Message row) ---
+            - ragas_faithfulness:      Float (nullable — filled after background eval)
+            - ragas_answer_relevancy:  Float (nullable)
+            - ragas_context_precision: Float (nullable)
+            - ragas_overall_score:     Float (nullable — weighted average of above 3)
+            - ragas_label:             String (nullable → "Excellent"|"Good"|"Fair"|"Poor")
+            - ragas_evaluated_at:      DateTime (nullable — when evaluation completed)
+
+            WHY store in Message instead of a separate table?
+            → Simpler joins, easy to fetch scores alongside the answer in one query.
+            → Assistant messages have scores; user messages have NULL for all ragas fields.
 
 Step 7:  Set up relationships:
             - Paper → ChatSession (one-to-many)

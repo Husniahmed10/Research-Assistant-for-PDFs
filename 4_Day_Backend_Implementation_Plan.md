@@ -474,9 +474,40 @@ def setup_langsmith():
 
 ---
 
-### 🕒 Session 3 (Afternoon) — SSE Streaming + Health Check + Polish
+### 🕒 Session 3 (Afternoon) — RAGAS Evaluation + SSE Streaming + Health Check
 
-**Step 35 — Add SSE streaming to chat route**
+**Step 35 — Implement `services/evaluator.py`**
+- Import `ragas`, `Dataset` from `datasets`, `ChatOpenAI`, `OpenAIEmbeddings` from `langchain_openai`
+- Write `evaluate_rag_response(query, answer, contexts, ground_truth=None)`:
+  1. Build `Dataset.from_dict({"question": [...], "answer": [...], "contexts": [...]})` 
+  2. Run `evaluate(dataset, metrics=[faithfulness, answer_relevancy, context_precision])`
+  3. Use `gpt-4o-mini` for RAGAS internals (saves cost — not shown to user)
+  4. Parse results DataFrame → return scores dict
+- Write `compute_overall(scores)` → weighted avg (faithfulness 40%, relevancy 35%, precision 25%)
+- Write `score_to_label(score)` → `"Excellent"` / `"Good"` / `"Fair"` / `"Poor"`
+- Wrap entirely in try/except — RAGAS failure must never crash the main chat flow
+
+**Step 36 — Implement `api/routes/evaluation.py`**
+- `GET /api/v1/evaluation/messages/{message_id}` → return ragas scores for one message
+- `GET /api/v1/evaluation/sessions/{session_id}/summary` → average scores for the session
+- `GET /api/v1/evaluation/papers/{paper_id}/report` → full quality report card for all Q&A on a paper
+
+**Step 37 — Wire RAGAS into `api/routes/chat.py`**
+- After saving assistant message to DB, add a `BackgroundTask`:
+  ```python
+  background_tasks.add_task(
+      run_ragas_background,
+      message_id = assistant_msg.id,
+      query      = query,
+      answer     = result["final_answer"],
+      contexts   = [c["text"] for c in result["reranked_chunks"]]
+  )
+  ```
+- `run_ragas_background()`: calls `evaluator.evaluate_rag_response()` → `crud.save_ragas_scores()`
+- Chat response returns immediately — RAGAS runs in background (takes ~5-10s)
+- Frontend can poll `/evaluation/messages/{id}` after receiving the answer
+
+**Step 38 — Add SSE streaming to chat route**
 - `GET /api/v1/chat/sessions/{session_id}/stream?query=...`
 - Use `StreamingResponse` with `media_type="text/event-stream"`
 - Stream events:
@@ -487,9 +518,8 @@ def setup_langsmith():
   data: {"type": "token", "content": " model"}
   data: {"type": "done",  "citations": [...], "model_used": "openai"}
   ```
-- Requires running the agent with `stream=True` or emitting step events manually
 
-**Step 36 — Implement `api/routes/health.py`**
+**Step 39 — Implement `api/routes/health.py`**
 ```python
 @router.get("/")
 async def health_check():
@@ -502,7 +532,7 @@ async def health_check():
     }
 ```
 
-**Step 37 — Add error handling throughout**
+**Step 40 — Add error handling throughout**
 - Wrap all route handlers with try/except
 - Return proper HTTP status codes:
   - 400 → Bad request (invalid PDF, missing paper)
@@ -511,7 +541,7 @@ async def health_check():
   - 500 → Internal server error (with error logged to Logfire)
 - Add global exception handler in `main.py`
 
-**Step 38 — Final `main.py` wiring**
+**Step 41 — Final `main.py` wiring**
 Ensure this order in startup:
 1. `setup_langsmith()` ← must be first (sets env vars before LangGraph imports)
 2. `setup_logfire(app)`
@@ -519,30 +549,35 @@ Ensure this order in startup:
 4. `app.state.pinecone_index = init_pinecone_index()`
 5. Load BM25 encoder
 6. Create uploads dir
+7. Include evaluation router: `app.include_router(evaluation_router)`
 
 ---
 
 ### 🕓 Session 4 (Evening) — Final Testing & README
 
-**Step 39 — End-to-end test of the FULL pipeline**
+**Step 42 — End-to-end test of the FULL pipeline**
 
 Test this exact flow:
 ```
-1. POST /api/v1/papers/upload          → upload real research PDF
-2. GET  /api/v1/papers/{id}/status     → poll until "ready"
-3. GET  /api/v1/papers/{id}/summary    → check all 6 sections present
-4. POST /api/v1/chat/sessions          → create session
-5. POST /sessions/{id}/message         → ask factual question → check citations
-6. POST /sessions/{id}/message         → ask follow-up → check chat history used
-7. POST /sessions/{id}/message         → try jailbreak → check blocked
-8. GET  /api/v1/health                 → all green
-9. Open LangSmith dashboard            → see agent traces
-10. Open Logfire dashboard             → see request waterfall
+1.  POST /api/v1/papers/upload               → upload real research PDF
+2.  GET  /api/v1/papers/{id}/status          → poll until "ready"
+3.  GET  /api/v1/papers/{id}/summary         → check all 6 sections present
+4.  POST /api/v1/chat/sessions               → create session
+5.  POST /sessions/{id}/message              → ask factual question → check citations
+6.  POST /sessions/{id}/message              → ask follow-up → check chat history used
+7.  POST /sessions/{id}/message              → try jailbreak → check blocked
+8.  Wait ~10 seconds after step 5 and 6...
+9.  GET  /api/v1/evaluation/messages/{id}    → see RAGAS scores (faithfulness, relevancy, precision)
+10. GET  /api/v1/evaluation/sessions/{id}/summary  → avg scores across session
+11. GET  /api/v1/evaluation/papers/{id}/report     → full paper quality report card
+12. GET  /api/v1/health                      → all green
+13. Open LangSmith dashboard                 → see agent traces
+14. Open Logfire dashboard                   → see request waterfall
 ```
 
-**Step 40 — Update README.md with**
+**Step 43 — Update README.md with**
 - Complete setup instructions
-- API endpoint reference table
+- API endpoint reference table (including evaluation routes)
 - Example curl commands
 - Architecture diagram (text version)
 
@@ -555,7 +590,7 @@ Test this exact flow:
 | **Day 1** | Foundation | `POST /upload` → PDF processed → summary returned ✅ |
 | **Day 2** | Basic RAG | `POST /message` → question answered using retrieved chunks ✅ |
 | **Day 3** | Agentic RAG | Same endpoint but now uses 10-node LangGraph agent with hybrid search ✅ |
-| **Day 4** | Production-grade | Guardrails block jailbreaks + LangSmith/Logfire dashboards live ✅ |
+| **Day 4** | Production-grade | Guardrails block jailbreaks + RAGAS scores per answer + LangSmith/Logfire dashboards live ✅ |
 
 ---
 

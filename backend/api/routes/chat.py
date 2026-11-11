@@ -21,6 +21,19 @@ Step 3:  POST /sessions/{session_id}/message — Ask a question:
             - Build initial AgentState with query, paper_id, session_id, chat_history
             - Run LangGraph agent: result = await agent.ainvoke(initial_state)
             - Save user message and assistant response to DB (crud.add_message)
+            - After saving, trigger RAGAS evaluation as a BackgroundTask:
+                background_tasks.add_task(
+                    run_ragas_evaluation,
+                    message_id   = assistant_message.id,
+                    query        = query,
+                    answer       = result["final_answer"],
+                    contexts     = [chunk["text"] for chunk in result["reranked_chunks"]],
+                    db           = db
+                )
+              run_ragas_evaluation():
+                  scores = await evaluator.evaluate_rag_response(query, answer, contexts)
+                  await crud.save_ragas_scores(db, message_id, scores)
+            - Return immediately (don't wait for RAGAS — it's a background task)
             - Return:
                 {
                   answer: str,

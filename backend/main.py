@@ -18,9 +18,10 @@ Step 8:  Add a shutdown event handler:
             - Close DB connection
             - Flush any pending Logfire/LangSmith traces
 Step 9:  Include all API routers:
-            - /api/v1/papers   → paper upload, list, delete
-            - /api/v1/chat     → Q&A chatbot endpoint
-            - /api/v1/health   → health check
+            - /api/v1/papers      → paper upload, list, delete, summary
+            - /api/v1/chat        → Q&A chatbot, sessions, messages, SSE stream
+            - /api/v1/evaluation  → RAGAS scores per message, session summary, paper report
+            - /api/v1/health      → health check
 Step 10: Add a root GET / route that returns API info
 Step 11: If __name__ == "__main__": run uvicorn with hot-reload in dev mode
 """
