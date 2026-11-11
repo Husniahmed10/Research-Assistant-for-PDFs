@@ -1,29 +1,77 @@
-"""
-services/embedder.py — Text Embedding Service
-===============================================
+"""Async embeddings with bounded batches and stable input/output ordering."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import OpenAI client and settings
-Step 2:  Initialize OpenAI client with API key from settings
+from typing import Any
 
-Step 3:  Write embed_text(text: str) → list[float]:
-            - Call openai.embeddings.create(model=settings.OPENAI_EMBEDDING_MODEL, input=text)
-            - Return the embedding vector (list of 1536 floats for text-embedding-3-small)
-            - Wrap in Logfire span for tracing
+from openai import AsyncOpenAI
 
-Step 4:  Write embed_batch(texts: list[str]) → list[list[float]]:
-            - Batch embedding for multiple texts (more efficient than calling embed_text in a loop)
-            - OpenAI allows up to 2048 inputs per batch call
-            - Split into batches of 100 if needed
-            - Return list of embedding vectors
+from core.config import settings
+from utils.text_utils import count_tokens
 
-Step 5:  Write embed_chunks(chunks: list[dict]) → list[dict]:
-            - For each chunk dict, add an "embedding" key with its vector
-            - Uses embed_batch internally for efficiency
-            - Log total tokens used and time taken
 
-NOTE: These embeddings are dense vectors. 
-      Sparse (BM25) vectors are computed separately in pinecone_client.py
-"""
+client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY, timeout=60.0, max_retries=2)
+_MAX_BATCH_SIZE = 100
+_MAX_INPUT_TOKENS = 8192
+_MAX_BATCH_TOKENS = 300_000
 
+
+async def embed_text(text: str) -> list[float]:
+    """Return the configured embedding model's vector for one non-empty text."""
+    return (await embed_batch([text]))[0]
+
+
+async def embed_batch(texts: list[str]) -> list[list[float]]:
+    """Embed inputs in batches of at most 100, preserving their original order.
+
+    Empty lists make no API calls. Validate all inputs before sending any batch;
+    oversized sections raise an error instead of being silently truncated.
+    Provider exceptions propagate after the SDK's bounded retries.
+    """
+    if not texts:
+        return []
+    token_counts = []
+    for index, text in enumerate(texts):
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"Embedding input {index} must be a non-empty string")
+        size = count_tokens(text, settings.OPENAI_EMBEDDING_MODEL)
+        if size > _MAX_INPUT_TOKENS:
+            raise ValueError(
+                f"Embedding input {index} exceeds {_MAX_INPUT_TOKENS} tokens; "
+                "split the section into smaller chunks"
+            )
+        token_counts.append(size)
+    if not settings.OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY must be configured to generate embeddings")
+
+    vectors = []
+    start = 0
+    while start < len(texts):
+        end = start
+        total_tokens = 0
+        while end < len(texts) and end - start < _MAX_BATCH_SIZE:
+            if total_tokens + token_counts[end] > _MAX_BATCH_TOKENS:
+                break
+            total_tokens += token_counts[end]
+            end += 1
+        options: dict[str, Any] = {}
+        if settings.OPENAI_EMBEDDING_MODEL.startswith("text-embedding-3-"):
+            options["dimensions"] = settings.PINECONE_DIMENSION
+        response = await client.embeddings.create(
+            model=settings.OPENAI_EMBEDDING_MODEL,
+            input=texts[start:end],
+            encoding_format="float",
+            **options,
+        )
+        ordered = sorted(response.data, key=lambda item: item.index)
+        if [item.index for item in ordered] != list(range(end - start)):
+            raise RuntimeError("Embedding response does not match the input batch")
+        vectors.extend(item.embedding for item in ordered)
+        start = end
+    return vectors
+
+
+async def embed_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add an embedding to each chunk in place after all requests succeed."""
+    vectors = await embed_batch([chunk["text"] for chunk in chunks])
+    for chunk, vector in zip(chunks, vectors):
+        chunk["embedding"] = vector
+    return chunks

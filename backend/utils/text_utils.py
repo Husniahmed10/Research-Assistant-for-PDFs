@@ -1,35 +1,69 @@
-"""
-utils/text_utils.py — Text Processing Helper Utilities
-=======================================================
+"""Text normalization, token budgeting, and research-paper heading detection."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Write count_tokens(text: str, model: str = "gpt-4o") → int:
-            - Use tiktoken to count tokens for a given model
-            - Used to ensure chunks and prompts don't exceed context limits
+import re
+import unicodedata
 
-Step 2:  Write truncate_to_tokens(text: str, max_tokens: int, model: str) → str:
-            - Truncate text to fit within max_tokens
-            - Preserves full sentences (don't cut mid-sentence)
-            - Used in summarizer.py to fit full paper text into context
+import tiktoken
 
-Step 3:  Write clean_text(text: str) → str:
-            - Remove excessive whitespace, null bytes, control characters
-            - Normalize unicode characters
-            - Used to clean raw PDF-extracted text before chunking
 
-Step 4:  Write extract_section_headers(text: str) → list[str]:
-            - Regex to detect common research paper section headers:
-                Abstract, Introduction, Related Work, Methodology,
-                Experiments, Results, Discussion, Conclusion, References
-            - Returns list of detected section names
-            - Used by semantic chunker in pdf_processor.py
+_SECTION_PATTERN = re.compile(
+    r"^[ \t]*(?:(?:\d+(?:\.\d+)*|[IVXLC]+)[.)]?[ \t]+)?"
+    r"(?P<header>Abstract|Introduction|Related[ \t]+Work|Methodology|Methods|"
+    r"Experiments|Results(?:[ \t]+and[ \t]+Discussion)?|Discussion|Conclusions?|References)"
+    r"[ \t]*[:.\-–—]?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
-Step 5:  Write apply_rrf(ranked_lists: list[list], k: int = 60) → list:
-            - Reciprocal Rank Fusion algorithm
-            - Input: multiple ranked lists of chunk IDs
-            - Output: single merged ranked list
-            - Formula: score(doc) = sum(1 / (rank + k)) for each list
-            - Used by retriever node to merge multi-query results
-"""
 
+def clean_text(text: str) -> str:
+    """Normalize compatibility Unicode, remove nulls, and collapse whitespace.
+
+    This flattens line breaks. Detect section headers on the original extracted
+    text before applying this helper if line boundaries are needed.
+    """
+    text = unicodedata.normalize("NFKC", text.replace("\x00", ""))
+    text = "".join(
+        character for character in text
+        if character.isspace() or unicodedata.category(character) != "Cc"
+    )
+    return " ".join(text.split())
+
+
+def count_tokens(text: str, model: str = "gpt-4o") -> int:
+    """Count ordinary text tokens using the named model's encoding.
+
+    Treat special-token-looking strings in uploaded text as ordinary content.
+    Unknown model names raise tiktoken's KeyError rather than guessing an encoding.
+    """
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(text, disallowed_special=()))
+
+
+def truncate_to_tokens(
+    text: str, max_tokens: int, model: str = "gpt-4o"
+) -> str:
+    """Return a token-limited prefix without introducing broken Unicode."""
+    if max_tokens < 0:
+        raise ValueError("max_tokens must be non-negative")
+    encoding = tiktoken.encoding_for_model(model)
+    tokens = encoding.encode(text, disallowed_special=())
+    if len(tokens) <= max_tokens:
+        return text
+    # A token boundary can split a UTF-8 character. Drop only an incomplete
+    # trailing character instead of introducing the replacement character.
+    truncated = encoding.decode_bytes(tokens[:max_tokens]).decode("utf-8", errors="ignore")
+    # Retokenization of the shortened Unicode prefix must still fit the budget.
+    while len(encoding.encode(truncated, disallowed_special=())) > max_tokens:
+        truncated = truncated[:-1]
+    return truncated
+
+
+def extract_section_headers(text: str) -> list[str]:
+    """Return heading names in document order, without section numbering.
+
+    Matches standalone heading lines, not occurrences inside prose. Supports
+    numbered headings, Roman numerals, case variants, and common related sections.
+    """
+    text = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
+    return [" ".join(match.group("header").split()).title()
+            for match in _SECTION_PATTERN.finditer(text)]
