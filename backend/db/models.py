@@ -1,57 +1,82 @@
-"""
-db/models.py — SQLAlchemy Database Models (Table Definitions)
-==============================================================
+"""Database models for uploaded papers and their conversations.
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import Column, String, Integer, DateTime, Text, Float, ForeignKey, JSON from SQLAlchemy
-Step 2:  Import Base from db.database
-Step 3:  Import uuid, datetime for defaults
-
---- TABLE 1: Paper ---
-Step 4:  Define Paper model (represents an uploaded PDF):
-            - id: String (UUID, primary key)
-            - filename: String (original filename)
-            - file_path: String (local path where PDF is stored)
-            - file_size_kb: Float
-            - page_count: Integer
-            - status: String  → "uploading" | "processing" | "ready" | "failed"
-            - full_text: Text (optional — raw extracted text)
-            - created_at: DateTime (default = now)
-            - updated_at: DateTime (auto-update on change)
-
---- TABLE 2: ChatSession ---
-Step 5:  Define ChatSession model (a conversation about a paper):
-            - id: String (UUID, primary key)
-            - paper_id: String (ForeignKey → Paper.id)
-            - title: String (auto-generated from first question)
-            - created_at: DateTime
-
---- TABLE 3: Message ---
-Step 6:  Define Message model (individual messages in a session):
-            - id: String (UUID, primary key)
-            - session_id: String (ForeignKey → ChatSession.id)
-            - role: String → "user" | "assistant"
-            - content: Text (the message text)
-            - retrieved_chunks: JSON (store which chunks used — for citation display)
-            - model_used: String (openai | groq — which LLM answered)
-            - latency_ms: Integer (how long it took in ms)
-            - created_at: DateTime
-
-            --- RAGAS Evaluation Fields (added to same Message row) ---
-            - ragas_faithfulness:      Float (nullable — filled after background eval)
-            - ragas_answer_relevancy:  Float (nullable)
-            - ragas_context_precision: Float (nullable)
-            - ragas_overall_score:     Float (nullable — weighted average of above 3)
-            - ragas_label:             String (nullable → "Excellent"|"Good"|"Fair"|"Poor")
-            - ragas_evaluated_at:      DateTime (nullable — when evaluation completed)
-
-            WHY store in Message instead of a separate table?
-            → Simpler joins, easy to fetch scores alongside the answer in one query.
-            → Assistant messages have scores; user messages have NULL for all ragas fields.
-
-Step 7:  Set up relationships:
-            - Paper → ChatSession (one-to-many)
-            - ChatSession → Message (one-to-many)
+Timestamps are stored as naive UTC datetimes for SQLite compatibility.
 """
 
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from sqlalchemy import JSON, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
+from db.database import Base
+
+
+def _new_id() -> str:
+    return str(uuid4())
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class Paper(Base):
+    """An uploaded PDF and its extracted content and summary."""
+
+    __tablename__ = "papers"
+
+    id = Column(String(36), primary_key=True, default=_new_id)
+    filename = Column(String(255), nullable=False)
+    file_path = Column(Text, nullable=False)
+    file_size_kb = Column(Float, nullable=False)
+    page_count = Column(Integer, nullable=True)
+    status = Column(String(20), nullable=False, default="uploading")
+    summary_json = Column(Text, nullable=True)
+    full_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+
+    sessions = relationship(
+        "ChatSession",
+        back_populates="paper",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class ChatSession(Base):
+    """A conversation associated with one paper."""
+
+    __tablename__ = "chat_sessions"
+
+    id = Column(String(36), primary_key=True, default=_new_id)
+    paper_id = Column(String(36), ForeignKey("papers.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+
+    paper = relationship("Paper", back_populates="sessions")
+    messages = relationship(
+        "Message",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="(Message.created_at, Message.id)",
+    )
+
+
+class Message(Base):
+    """A user or assistant message with optional retrieval metadata."""
+
+    __tablename__ = "messages"
+
+    id = Column(String(36), primary_key=True, default=_new_id)
+    session_id = Column(
+        String(36), ForeignKey("chat_sessions.id"), nullable=False, index=True
+    )
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    retrieved_chunks = Column(JSON, nullable=False, default=list)
+    model_used = Column(String(255), nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+
+    session = relationship("ChatSession", back_populates="messages")
