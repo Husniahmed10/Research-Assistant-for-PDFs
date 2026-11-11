@@ -1,70 +1,159 @@
-"""
-db/crud.py — Database CRUD Operations (Create, Read, Update, Delete)
-=====================================================================
+"""Async database operations.
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-All functions are async and accept an AsyncSession as first argument.
-
---- Paper CRUD ---
-Step 1:  create_paper(db, filename, file_path, ...) → Paper
-            - Create a new Paper record with status="uploading"
-            - Return the created object
-
-Step 2:  get_paper(db, paper_id) → Paper | None
-            - Fetch a paper by its UUID
-            - Return None if not found
-
-Step 3:  get_all_papers(db) → list[Paper]
-            - Return all papers ordered by created_at DESC
-
-Step 4:  update_paper_status(db, paper_id, status, page_count=None) → Paper
-            - Update status field (uploading → processing → ready | failed)
-            - Optionally update page_count after extraction
-
-Step 5:  delete_paper(db, paper_id) → bool
-            - Delete paper record
-            - Also physically delete the PDF file from disk
-            - Return True if deleted, False if not found
-
---- ChatSession CRUD ---
-Step 6:  create_session(db, paper_id, title) → ChatSession
-Step 7:  get_sessions_for_paper(db, paper_id) → list[ChatSession]
-Step 8:  get_session(db, session_id) → ChatSession | None
-
---- Message CRUD ---
-Step 9:  add_message(db, session_id, role, content, retrieved_chunks, model_used, latency_ms) → Message
-            - Insert a new Message row (ragas fields all NULL initially)
-            - Return created Message object
-
-Step 10: get_messages_for_session(db, session_id) → list[Message]
-            - Return messages ordered by created_at ASC (chronological)
-
-Step 11: get_message(db, message_id) → Message | None
-            - Fetch a single message by ID
-            - Used by evaluation route to return scores
-
---- RAGAS CRUD ---
-Step 12: save_ragas_scores(db, message_id, scores: dict) → Message
-            - Find the assistant Message by message_id
-            - Update these fields from scores dict:
-                * ragas_faithfulness      = scores["faithfulness"]
-                * ragas_answer_relevancy  = scores["answer_relevancy"]
-                * ragas_context_precision = scores["context_precision"]
-                * ragas_overall_score     = scores["overall_score"]
-                * ragas_label             = scores["label"]
-                * ragas_evaluated_at      = datetime.utcnow()
-            - Commit and return updated Message
-            - Called from background task after RAGAS evaluation completes
-
-Step 13: get_session_ragas_summary(db, session_id) → dict
-            - Fetch all assistant messages for the session that have ragas scores
-            - Compute averages: avg_faithfulness, avg_relevancy, avg_precision, avg_overall
-            - Return summary dict with score_history list
-
-Step 14: get_paper_ragas_report(db, paper_id) → dict
-            - Join Paper → ChatSession → Message
-            - Aggregate all evaluated messages across all sessions
-            - Return full report: total questions, avg scores, model usage counts, avg latency
+Writes flush changes but do not commit. Callers must await db.commit() to persist
+them, or use async with db.begin() to group several operations atomically.
+File and vector cleanup belong in the service layer, not database CRUD.
 """
 
+import json
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from db.models import ChatSession, Message, Paper
+
+
+async def create_paper(
+    db: AsyncSession,
+    filename: str,
+    file_path: str,
+    file_size_kb: float,
+    page_count: int | None = None,
+    full_text: str | None = None,
+) -> Paper:
+    """Insert a paper with its initial uploading status."""
+    paper = Paper(
+        filename=filename,
+        file_path=file_path,
+        file_size_kb=file_size_kb,
+        page_count=page_count,
+        full_text=full_text,
+        status="uploading",
+    )
+    db.add(paper)
+    await db.flush()
+    return paper
+
+
+async def get_paper(db: AsyncSession, paper_id: str) -> Paper | None:
+    """Return a paper by ID, or None when it does not exist."""
+    return await db.get(Paper, paper_id)
+
+
+async def get_all_papers(db: AsyncSession) -> list[Paper]:
+    """List papers newest first with a stable tie-breaker."""
+    result = await db.scalars(
+        select(Paper).order_by(Paper.created_at.desc(), Paper.id.desc())
+    )
+    return list(result.all())
+
+
+async def update_paper_status(
+    db: AsyncSession,
+    paper_id: str,
+    status: str,
+    page_count: int | None = None,
+) -> Paper | None:
+    """Change processing status and optionally set the extracted page count."""
+    if status not in {"uploading", "processing", "ready", "failed"}:
+        raise ValueError("Unsupported paper status")
+    paper = await get_paper(db, paper_id)
+    if paper is None:
+        return None
+    paper.status = status
+    if page_count is not None:
+        paper.page_count = page_count
+    await db.flush()
+    return paper
+
+
+async def update_paper_summary(
+    db: AsyncSession, paper_id: str, summary: dict[str, Any] | str
+) -> Paper | None:
+    """Store a summary object or JSON object string in the Text column."""
+    summary_data = json.loads(summary) if isinstance(summary, str) else summary
+    if not isinstance(summary_data, dict):
+        raise ValueError("Summary must be a JSON object")
+    serialized = json.dumps(summary_data, ensure_ascii=False, allow_nan=False)
+    paper = await get_paper(db, paper_id)
+    if paper is None:
+        return None
+    paper.summary_json = serialized
+    await db.flush()
+    return paper
+
+
+async def delete_paper(db: AsyncSession, paper_id: str) -> bool:
+    """Delete a paper and its related sessions/messages; return whether found."""
+    paper = await get_paper(db, paper_id)
+    if paper is None:
+        return False
+    await db.delete(paper)
+    await db.flush()
+    return True
+
+
+async def create_session(
+    db: AsyncSession, paper_id: str, title: str | None = None
+) -> ChatSession:
+    """Insert a conversation; reject a missing parent paper."""
+    paper = await get_paper(db, paper_id)
+    if paper is None:
+        raise ValueError("Paper not found")
+    session = ChatSession(paper=paper, title=title)
+    db.add(session)
+    await db.flush()
+    return session
+
+
+async def get_sessions_for_paper(
+    db: AsyncSession, paper_id: str
+) -> list[ChatSession]:
+    """List a paper's conversations newest first."""
+    result = await db.scalars(
+        select(ChatSession)
+        .where(ChatSession.paper_id == paper_id)
+        .order_by(ChatSession.created_at.desc(), ChatSession.id.desc())
+    )
+    return list(result.all())
+
+
+async def add_message(
+    db: AsyncSession,
+    session_id: str,
+    role: str,
+    content: str,
+    retrieved_chunks: list[dict[str, Any]] | None = None,
+    model_used: str | None = None,
+    latency_ms: int | None = None,
+) -> Message:
+    """Insert a user/assistant message in an existing conversation."""
+    if role not in {"user", "assistant"}:
+        raise ValueError("Message role must be user or assistant")
+    session = await db.get(ChatSession, session_id)
+    if session is None:
+        raise ValueError("Chat session not found")
+    message = Message(
+        session=session,
+        role=role,
+        content=content,
+        retrieved_chunks=retrieved_chunks if retrieved_chunks is not None else [],
+        model_used=model_used,
+        latency_ms=latency_ms,
+    )
+    db.add(message)
+    await db.flush()
+    return message
+
+
+async def get_messages_for_session(
+    db: AsyncSession, session_id: str
+) -> list[Message]:
+    """Return chat history oldest first with a stable tie-breaker."""
+    result = await db.scalars(
+        select(Message)
+        .where(Message.session_id == session_id)
+        .order_by(Message.created_at.asc(), Message.id.asc())
+    )
+    return list(result.all())

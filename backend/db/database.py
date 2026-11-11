@@ -1,7 +1,7 @@
 """Async database engine, session factory, and model base."""
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import declarative_base
 
 from core.config import settings
 
@@ -12,8 +12,7 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-class Base(DeclarativeBase):
-    """Base class for database models."""
+Base = declarative_base()
 
 
 async def init_db() -> None:
