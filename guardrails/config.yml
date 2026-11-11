@@ -1,0 +1,38 @@
+"""
+guardrails/config.yml — NeMo Guardrails Configuration
+=======================================================
+
+STEP-BY-STEP IMPLEMENTATION PLAN:
+-----------------------------------
+This YAML file tells NeMo Guardrails:
+  1. Which LLM to use for rail checks (OpenAI GPT-4o)
+  2. Which Colang flow files to load (main.co)
+  3. Which rails to activate (input + output)
+
+WHAT TO WRITE:
+--------------
+models:
+  - type: main
+    engine: openai
+    model: gpt-4o
+
+rails:
+  input:
+    flows:
+      - check jailbreak          # detects "ignore instructions", "pretend you are", etc.
+      - check off topic          # detects questions unrelated to the research paper
+      - check prompt injection   # detects injected instructions hidden in queries
+
+  output:
+    flows:
+      - check response grounded  # ensures answer is based on retrieved context
+      - check harmful content    # detects toxic, harmful output
+
+instructions:
+  - type: general
+    content: |
+      You are a helpful research assistant that answers questions about
+      uploaded academic research papers. You must only answer questions
+      that are relevant to the research paper content.
+"""
+

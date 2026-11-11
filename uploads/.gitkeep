@@ -1,0 +1,4 @@
+# uploads/.gitkeep
+# This empty file ensures the uploads/ folder is tracked by Git
+# even though its contents (.pdf files) are gitignored.
+

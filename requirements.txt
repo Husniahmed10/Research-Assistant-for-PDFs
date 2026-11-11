@@ -1,0 +1,71 @@
+# =============================================================================
+# Research Assistant for PDFs — Backend Dependencies
+# Python 3.10+ required
+# Install with: pip install -r requirements.txt
+# =============================================================================
+
+# ── Web Framework ─────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9        # for file uploads
+python-dotenv==1.0.1
+
+# ── Data Validation ───────────────────────────────────────────────────────────
+pydantic==2.7.1
+pydantic-settings==2.3.1
+
+# ── PDF Processing ────────────────────────────────────────────────────────────
+pymupdf==1.24.5                # fitz — fast PDF text + layout extraction
+pdfplumber==0.11.1             # fallback PDF parser (tables, complex layouts)
+
+# ── LLM & AI Core ────────────────────────────────────────────────────────────
+openai==1.51.0                 # OpenAI GPT-4o (primary LLM + embeddings) — >=1.40.0 required by langchain-openai 0.1.23
+groq==0.11.0                   # Groq LLaMA-3 (fallback LLM)
+tiktoken==0.7.0                # Token counting for chunking
+
+# ── LangChain & LangGraph (Agentic Flow) ─────────────────────────────────────
+langchain==0.2.16
+langchain-openai==0.1.23
+langchain-community==0.2.16
+langchain-core==0.2.38         # Must be >=0.2.22 for langgraph 0.1.x
+langgraph==0.1.19              # Agentic workflow graph
+
+# ── LangSmith (Agentic Tracing) ───────────────────────────────────────────────
+langsmith==0.1.98
+
+# ── Vector Database ───────────────────────────────────────────────────────────
+pinecone-client==4.1.0         # Pinecone vector DB client
+pinecone-text==0.9.0           # BM25 sparse encoder for hybrid search
+
+# ── Reranker ─────────────────────────────────────────────────────────────────
+cohere==5.5.8                  # Cohere reranker API
+flashrank==0.2.9               # Local reranker (offline fallback)
+
+# ── Guardrails ────────────────────────────────────────────────────────────────
+nemoguardrails==0.9.1          # NeMo Guardrails for input/output safety
+
+# ── LLM Gateway ───────────────────────────────────────────────────────────────
+portkey-ai==1.5.1              # Portkey gateway (fallback, caching, logging) — latest compatible with Python 3.10
+
+# ── Observability & Tracing ───────────────────────────────────────────────────
+logfire==0.46.1                # Pydantic Logfire structured tracing
+
+# ── Database (SQL) ────────────────────────────────────────────────────────────
+sqlalchemy==2.0.31             # ORM
+aiosqlite==0.20.0              # Async SQLite driver (dev/demo)
+alembic==1.13.1                # Database migrations
+
+# ── Retrieval / Search ────────────────────────────────────────────────────────
+rank-bm25==0.2.2               # Local BM25 sparse retrieval
+
+# ── Evaluation (Bonus) ────────────────────────────────────────────────────────
+ragas==0.1.14                  # RAG evaluation metrics (faithfulness, relevance)
+
+# ── HTTP & Async ─────────────────────────────────────────────────────────────
+httpx==0.27.0
+aiofiles==23.2.1
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+numpy==1.26.4
+python-jose[cryptography]==3.3.0  # JWT tokens (if adding auth)
+
