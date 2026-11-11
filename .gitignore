@@ -1,60 +1,40 @@
-# =============================================================================
-# .gitignore — Files to never commit to Git
-# =============================================================================
-
-# Environment & Secrets
+# Secrets (keep example configuration tracked)
 .env
+.env.*
 *.env
 !.env.example
 
-# Python
+# Python and local environments
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-.Python
-*.pyc
-*.pyi
-
-# Virtual Environments
-venv/
 .venv/
+venv/
 env/
 ENV/
-.virtualenv/
 
-# SQLite Database
+# Local databases and uploaded documents
 *.db
+*.db-*
 *.sqlite
 *.sqlite3
+backend/uploads/*
+!backend/uploads/.gitkeep
 
-# Uploaded Files (don't commit user uploads)
-uploads/*
-!uploads/.gitkeep
-
-# Logs
-*.log
-logs/
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-coverage.xml
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*.DS_Store
-Thumbs.db
-
-# Build artifacts
+# Frontend dependencies and build output
+node_modules/
 dist/
 build/
 *.egg-info/
 
-# LangSmith / Logfire local caches
+# Test output, logs, and local tools
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.log
+logs/
 .langchain/
-
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
