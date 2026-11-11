@@ -1,28 +1,39 @@
-"""
-main.py — FastAPI Application Entry Point
-===========================================
+"""Minimal API. Run from backend with: uvicorn main:app --reload."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import FastAPI, CORS middleware, and all routers
-Step 2:  Load settings from core/config.py
-Step 3:  Initialize Logfire tracing (instrument FastAPI automatically)
-Step 4:  Initialize LangSmith tracing (set environment variables)
-Step 5:  Create the FastAPI app instance with metadata (title, version, docs URL)
-Step 6:  Add CORS middleware — allow React frontend (localhost:3000) to call this API
-Step 7:  Add a startup event handler:
-            - Connect to SQLite DB and run migrations (create tables)
-            - Initialize Pinecone index (create if not exists)
-            - Log "Server ready" via Logfire
-Step 8:  Add a shutdown event handler:
-            - Close DB connection
-            - Flush any pending Logfire/LangSmith traces
-Step 9:  Include all API routers:
-            - /api/v1/papers      → paper upload, list, delete, summary
-            - /api/v1/chat        → Q&A chatbot, sessions, messages, SSE stream
-            - /api/v1/evaluation  → RAGAS scores per message, session summary, paper report
-            - /api/v1/health      → health check
-Step 10: Add a root GET / route that returns API info
-Step 11: If __name__ == "__main__": run uvicorn with hot-reload in dev mode
-"""
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from api.routes.papers import router as papers_router
+from core.config import settings
+from db.database import engine, init_db
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Prepare storage and tables at startup; release connections at shutdown."""
+    try:
+        Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+        await init_db()
+        yield
+    finally:
+        await engine.dispose()
+
+
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(papers_router)
+
+
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {"status": "ok", "app": settings.APP_NAME}

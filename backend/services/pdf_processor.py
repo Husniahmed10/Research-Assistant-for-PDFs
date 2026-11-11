@@ -132,5 +132,11 @@ def chunk_text_semantic(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def process_pdf(file_path: str | Path) -> list[dict[str, Any]]:
     """Extract a PDF and return its semantic (or fallback fixed) chunks."""
+    return process_pdf_document(file_path)["chunks"]
+
+
+def process_pdf_document(file_path: str | Path) -> dict[str, Any]:
+    """Return extracted text, pages, page count and chunks from one PDF read."""
     document = extract_text_from_pdf(file_path)
-    return chunk_text_semantic(document["pages"])
+    document["chunks"] = chunk_text_semantic(document["pages"])
+    return document
