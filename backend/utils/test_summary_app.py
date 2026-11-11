@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from sqlalchemy import inspect
@@ -103,13 +103,17 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             uploads = Path(directory) / "uploads"
             startup = AsyncMock(side_effect=initialize)
+            index = Mock()
             with patch.object(settings, "UPLOAD_DIR", str(uploads)), \
                     patch.object(database, "engine", test_engine), \
                     patch.object(main, "engine", test_engine), \
-                    patch.object(main, "init_db", startup):
+                    patch.object(main, "init_db", startup), \
+                    patch.object(main, "init_pinecone_index", return_value=index) as init_index:
                 async with main.app.router.lifespan_context(main.app):
                     self.assertTrue(uploads.is_dir())
                     startup.assert_awaited_once()
+                    init_index.assert_called_once_with()
+                    self.assertIs(main.app.state.pinecone_index, index)
                     async with httpx.AsyncClient(
                         transport=httpx.ASGITransport(app=main.app), base_url="http://test"
                     ) as client:
@@ -122,7 +126,21 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(response.headers["access-control-allow-origin"], "http://localhost:3000")
                         headers["Origin"] = "https://unlisted.example"
                         self.assertEqual((await client.options("/", headers=headers)).status_code, 400)
+                self.assertIsNone(main.app.state.pinecone_index)
         self.assertEqual(main.papers_router.prefix, "/api/v1/papers")
+
+    async def test_pinecone_startup_failure_stops_app(self):
+        dispose = AsyncMock()
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(settings, "UPLOAD_DIR", directory), \
+                    patch.object(main, "init_db", AsyncMock()), \
+                    patch.object(main, "init_pinecone_index", side_effect=RuntimeError("Index unavailable")), \
+                    patch.object(main, "engine", SimpleNamespace(dispose=dispose)):
+                with self.assertRaisesRegex(RuntimeError, "Index unavailable"):
+                    async with main.app.router.lifespan_context(main.app):
+                        self.fail("Application must not start without its vector index")
+                self.assertIsNone(main.app.state.pinecone_index)
+                dispose.assert_awaited_once()
 
 
 if __name__ == "__main__":

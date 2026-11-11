@@ -7,7 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 import fitz
@@ -17,9 +17,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import main
 from api.routes import papers
 from core.config import settings
-from core.dependencies import get_db
+from core.dependencies import get_db, get_pinecone_index
 from db import crud, database
 from services.summarizer import SUMMARY_KEYS
+from utils.test_pinecone import FakeIndex
+from starlette.requests import Request
 
 
 class PaperAPITests(unittest.IsolatedAsyncioTestCase):
@@ -31,12 +33,22 @@ class PaperAPITests(unittest.IsolatedAsyncioTestCase):
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.summary = {key: f"Summary for {key}" for key in SUMMARY_KEYS}
         self.summary_mock = AsyncMock(return_value=self.summary)
+        self.index = FakeIndex()
+        self.index.upsert = Mock(wraps=self.index.upsert)
+        self.index.delete = Mock(wraps=self.index.delete)
+
+        async def fake_embeddings(chunks):
+            return [{**chunk, "embedding": [0.1] * settings.PINECONE_DIMENSION} for chunk in chunks]
+
+        self.embedding_mock = AsyncMock(side_effect=fake_embeddings)
         self.patches = [
             patch.object(settings, "UPLOAD_DIR", str(self.uploads)),
             patch.object(database, "engine", self.engine),
             patch.object(main, "engine", self.engine),
             patch.object(papers, "AsyncSessionLocal", self.sessions),
             patch.object(papers, "generate_summary", self.summary_mock),
+            patch.object(papers, "embed_chunks", self.embedding_mock),
+            patch.object(main, "init_pinecone_index", return_value=self.index),
         ]
         for item in self.patches:
             item.start()
@@ -83,6 +95,10 @@ class PaperAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get(f"{prefix}/summary")).json(), self.summary)
         self.summary_mock.assert_awaited_once()
         self.assertIn("It works.", self.summary_mock.call_args.args[0])
+        self.embedding_mock.assert_awaited_once()
+        self.assertTrue(self.index.records)
+        self.assertTrue(all(row["metadata"]["paper_id"] == paper_id for row in self.index.records.values()))
+        self.assertTrue(all(len(row["values"]) == settings.PINECONE_DIMENSION for row in self.index.records.values()))
         listing = (await self.client.get("/api/v1/papers/")).json()
         self.assertEqual([row["id"] for row in listing], [paper_id])
         self.assertNotIn("file_path", listing[0])
@@ -99,6 +115,8 @@ class PaperAPITests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
         self.assertEqual((await self.client.delete(prefix)).json(), {"message": "deleted"})
         self.assertFalse(path.exists())
+        self.assertEqual(self.index.records, {})
+        self.index.delete.assert_called_once_with(filter={"paper_id": paper_id})
         self.assertEqual((await self.client.get(f"{prefix}/status")).status_code, 404)
         self.assertEqual((await self.client.get("/api/v1/papers/")).json(), [])
         async with self.sessions() as db:
@@ -112,6 +130,8 @@ class PaperAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get("/api/v1/papers/")).json(), [])
         self.assertEqual(list(self.uploads.iterdir()), [])
         self.summary_mock.assert_not_awaited()
+        self.embedding_mock.assert_not_awaited()
+        self.index.upsert.assert_not_called()
 
     async def test_background_failures_are_persisted(self):
         self.summary_mock.side_effect = RuntimeError("private provider error")
@@ -167,6 +187,51 @@ class PaperAPITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.client.delete(prefix)).status_code, 500)
         self.assertEqual((await self.client.get(f"{prefix}/status")).status_code, 200)
         self.assertEqual((await self.client.delete(prefix)).status_code, 200)
+
+    async def test_dependency_returns_startup_index_or_503(self):
+        request = Request({"type": "http", "app": main.app})
+        self.assertIs(get_pinecone_index(request), self.index)
+        with patch.object(main.app.state, "pinecone_index", None):
+            self.assertEqual((await self.upload()).status_code, 503)
+        self.assertEqual(list(self.uploads.iterdir()), [])
+        self.summary_mock.assert_not_awaited()
+
+    async def test_embedding_failure_never_marks_ready(self):
+        self.embedding_mock.side_effect = RuntimeError("Embedding unavailable")
+        with self.assertLogs(papers.logger, level="ERROR"):
+            response = await self.upload()
+        paper_id = response.json()["paper_id"]
+        self.assertEqual((await self.client.get(f"/api/v1/papers/{paper_id}/status")).json()["status"], "failed")
+        self.index.upsert.assert_not_called()
+
+    async def test_partial_index_failure_cleans_vectors(self):
+        def fail_after_partial_write(vectors):
+            FakeIndex.upsert(self.index, vectors[:1])
+            raise RuntimeError("Index unavailable")
+
+        self.index.upsert.side_effect = fail_after_partial_write
+        with self.assertLogs(papers.logger, level="ERROR"):
+            response = await self.upload()
+        paper_id = response.json()["paper_id"]
+        prefix = f"/api/v1/papers/{paper_id}"
+        self.assertEqual((await self.client.get(f"{prefix}/status")).json()["status"], "failed")
+        self.assertEqual((await self.client.get(f"{prefix}/summary")).status_code, 409)
+        self.index.delete.assert_called_once_with(filter={"paper_id": paper_id})
+        self.assertEqual(self.index.records, {})
+
+    async def test_vector_delete_failure_preserves_file_and_record(self):
+        response = await self.upload()
+        paper_id = response.json()["paper_id"]
+        prefix = f"/api/v1/papers/{paper_id}"
+        async with self.sessions() as db:
+            path = Path((await crud.get_paper(db, paper_id)).file_path)
+        self.index.delete.side_effect = RuntimeError("Index unavailable")
+        self.assertEqual((await self.client.delete(prefix)).status_code, 503)
+        self.assertTrue(path.exists())
+        self.assertEqual((await self.client.get(f"{prefix}/status")).status_code, 200)
+        self.index.delete.side_effect = None
+        self.assertEqual((await self.client.delete(prefix)).status_code, 200)
+        self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":

@@ -7,15 +7,18 @@ from pathlib import PureWindowsPath
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from pinecone import Index
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from core.dependencies import get_db
+from core.dependencies import get_db, get_pinecone_index
 from db import crud
 from db.database import AsyncSessionLocal
 from db.models import Paper
+from services.embedder import embed_chunks
 from services.pdf_processor import process_pdf_document
+from services.pinecone_client import delete_paper_vectors, upsert_chunks
 from services.summarizer import generate_summary
 from utils.file_utils import (
     delete_upload_file, get_file_size_kb, save_upload_file, validate_pdf,
@@ -56,12 +59,12 @@ async def _require_paper(db: AsyncSession, paper_id: str) -> Paper:
     return paper
 
 
-async def process_and_index(paper_id: str, file_path: str) -> None:
-    """Extract/chunk and summarize using sessions independent of the request.
+async def process_and_index(paper_id: str, file_path: str, index: Index) -> None:
+    """Extract, summarize, embed and index with independent database sessions.
 
-    Vector indexing is deferred until the Pinecone service is implemented.
     BackgroundTasks are not durable; a server restart can interrupt this work.
     """
+    indexing_started = False
     try:
         document = await run_in_threadpool(process_pdf_document, file_path)
         async with AsyncSessionLocal() as db:
@@ -73,16 +76,24 @@ async def process_and_index(paper_id: str, file_path: str) -> None:
             await db.commit()
 
         summary = await generate_summary(document["full_text"])
+        chunks = await embed_chunks(document["chunks"])
+        indexing_started = True
+        await run_in_threadpool(upsert_chunks, index, chunks, paper_id)
         async with AsyncSessionLocal() as db:
             async with db.begin():
                 paper = await crud.get_paper(db, paper_id)
                 if paper is None or paper.status != "processing":
-                    return
+                    raise ValueError("Paper is no longer awaiting processing")
                 await crud.update_paper_summary(db, paper_id, summary)
                 await crud.update_paper_status(db, paper_id, "ready")
     except Exception:
         # Do not include provider errors or document contents in API responses.
         logger.error("Paper processing failed for %s", paper_id)
+        if indexing_started:
+            try:
+                await run_in_threadpool(delete_paper_vectors, index, paper_id)
+            except Exception:
+                logger.error("Could not clean up vectors for failed paper %s", paper_id)
         try:
             async with AsyncSessionLocal() as db:
                 async with db.begin():
@@ -96,6 +107,7 @@ async def upload_paper(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    index: Index = Depends(get_pinecone_index),
 ) -> UploadResponse:
     file_path = None
     try:
@@ -130,7 +142,7 @@ async def upload_paper(
     finally:
         await file.close()
 
-    background_tasks.add_task(process_and_index, paper_id, file_path)
+    background_tasks.add_task(process_and_index, paper_id, file_path, index)
     return response
 
 
@@ -163,11 +175,17 @@ async def list_papers(db: AsyncSession = Depends(get_db)) -> list[Paper]:
 
 @router.delete("/{paper_id}")
 async def delete_paper(
-    paper_id: UUID, db: AsyncSession = Depends(get_db)
+    paper_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    index: Index = Depends(get_pinecone_index),
 ) -> dict[str, str]:
     paper = await _require_paper(db, str(paper_id))
     if paper.status in {"uploading", "processing"}:
         raise HTTPException(status_code=409, detail="Cannot delete a paper while processing")
+    try:
+        await run_in_threadpool(delete_paper_vectors, index, paper.id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Could not delete vectors; please retry") from exc
     try:
         await run_in_threadpool(delete_upload_file, paper.file_path)
     except (OSError, ValueError) as exc:
