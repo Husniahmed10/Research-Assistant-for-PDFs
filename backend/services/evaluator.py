@@ -1,124 +1,120 @@
-"""
-services/evaluator.py — RAGAS Evaluation Service
-==================================================
+"""Failure-isolated RAGAS scoring; call the synchronous evaluator in a worker."""
 
-WHAT IS RAGAS?
---------------
-RAGAS (Retrieval Augmented Generation Assessment) is a framework that
-evaluates the quality of your RAG pipeline WITHOUT needing human-labeled
-ground truth answers. It scores 4 key dimensions automatically.
+from copy import deepcopy
+from datetime import datetime, timezone
+from math import isfinite
+from time import perf_counter
 
-THE 4 METRICS WE USE (no ground truth needed):
------------------------------------------------
+import logfire
+from starlette.concurrency import run_in_threadpool
 
-1. FAITHFULNESS (0.0 → 1.0)
-   "Is the answer factually grounded in the retrieved context?"
-   - Checks if every claim in the answer can be found in the context chunks
-   - Score 1.0 = every statement is supported by context
-   - Score 0.0 = answer is hallucinated / not in context
-   - HOW: LLM breaks answer into claims → checks each claim against context
+from core.config import settings
+from db.database import AsyncSessionLocal
+from db import crud
 
-2. ANSWER RELEVANCY (0.0 → 1.0)
-   "Does the answer actually address the question asked?"
-   - Generates N questions from the answer → checks similarity to original question
-   - Score 1.0 = answer directly addresses the question
-   - Score 0.0 = answer is off-topic or too vague
-   - HOW: Reverse-engineer questions from answer → cosine similarity to original query
+_WEIGHTS = {"faithfulness": 0.40, "answer_relevancy": 0.35, "context_precision": 0.25}
 
-3. CONTEXT PRECISION (0.0 → 1.0)
-   "Are the retrieved chunks actually relevant to the question?"
-   - Checks what fraction of retrieved chunks were actually useful
-   - Score 1.0 = all retrieved chunks were relevant
-   - Score 0.0 = retrieval pulled irrelevant chunks
-   - HOW: LLM judges each chunk's relevance to the question
 
-4. CONTEXT RECALL (0.0 → 1.0)
-   "Did we retrieve ALL the information needed to answer?"
-   - Checks if the answer contains info that wasn't in the context
-   - Score 1.0 = all answer content is traceable to context
-   - Score 0.0 = answer needed info that wasn't retrieved
-   - NOTE: Requires ground truth — use only if you have reference answers
+def _score(value):
+    if value is None or isinstance(value, (bool, str)):
+        return None
+    try:
+        value = float(value)
+        return value if isfinite(value) and 0 <= value <= 1 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
 
-Step 1:  Import from ragas:
-            from ragas import evaluate
-            from ragas.metrics import faithfulness, answer_relevancy, context_precision
-            from ragas.metrics import context_recall  # optional — needs ground truth
-            from datasets import Dataset
+def compute_overall(scores: dict) -> float | None:
+    """Require all three valid metrics; missing scores are never treated as zero."""
+    values = {name: _score(scores.get(name)) for name in _WEIGHTS}
+    if any(value is None for value in values.values()):
+        return None
+    return round(sum(values[name] * weight for name, weight in _WEIGHTS.items()), 3)
 
-Step 2:  Import OpenAI LLM and embeddings wrappers for RAGAS:
-            from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-            RAGAS uses these internally to run its evaluation prompts
 
-Step 3:  Write evaluate_rag_response(
-                query: str,
-                answer: str,
-                contexts: list[str],      # text of each retrieved chunk
-                ground_truth: str = None  # optional reference answer
-            ) -> dict:
+def score_to_label(score: float | None) -> str | None:
+    value = _score(score)
+    if value is None:
+        return None
+    return "Excellent" if value >= 0.8 else "Good" if value >= 0.6 else "Fair" if value >= 0.4 else "Poor"
 
-            --- Build the RAGAS dataset ---
-            data = {
-                "question":  [query],
-                "answer":    [answer],
-                "contexts":  [contexts],   # list of lists (one list per sample)
-            }
-            if ground_truth:
-                data["ground_truth"] = [ground_truth]
 
-            dataset = Dataset.from_dict(data)
+def evaluate_rag_response(query: str, answer: str, contexts: list[str], ground_truth: str | None = None) -> dict:
+    """Return JSON-safe scores, including nulls for missing/failed measurements.
 
-            --- Choose metrics based on available data ---
-            metrics = [faithfulness, answer_relevancy, context_precision]
-            if ground_truth:
-                metrics.append(context_recall)
+    Without a human reference, use context_utilization, RAGAS's reference-free
+    context precision variant. precision_metric makes this distinction explicit.
+    Imports and model construction are inside the failure boundary so an optional
+    evaluation dependency or provider failure never prevents chat startup.
+    """
+    started = perf_counter()
+    result = {name: None for name in _WEIGHTS}
+    result.update(context_recall=None, overall_score=None, label=None, status="failed",
+                  precision_metric="context_precision" if ground_truth is not None else "context_utilization")
+    try:
+        if not settings.OPENAI_API_KEY:
+            raise ValueError("Evaluation provider is not configured")
+        if not isinstance(query, str) or not query.strip() or not isinstance(answer, str) or not answer.strip():
+            raise ValueError("Question and answer are required")
+        if not isinstance(contexts, list) or not contexts or any(not isinstance(c, str) or not c.strip() for c in contexts):
+            raise ValueError("Non-empty source contexts are required")
+        if ground_truth is not None and (not isinstance(ground_truth, str) or not ground_truth.strip()):
+            raise ValueError("Reference answer must be non-empty")
+        import ragas
+        from datasets import Dataset
+        from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+        from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_utilization, context_recall
+        from ragas.run_config import RunConfig
 
-            --- Run evaluation ---
-            result = evaluate(
-                dataset=dataset,
-                metrics=metrics,
-                llm=ChatOpenAI(model="gpt-4o-mini"),  # use mini to save costs
-                embeddings=OpenAIEmbeddings(model="text-embedding-3-small")
+        data = {"question": [query], "answer": [answer], "contexts": [contexts]}
+        precision = context_precision if ground_truth is not None else context_utilization
+        metrics = [faithfulness, answer_relevancy, precision]
+        if ground_truth is not None:
+            data["ground_truth"] = [ground_truth]
+            metrics.append(context_recall)
+        with logfire.span("ragas.evaluate", model="gpt-4o-mini", context_count=len(contexts)):
+            evaluated = ragas.evaluate(
+                dataset=Dataset.from_dict(data), metrics=deepcopy(metrics),
+                llm=ChatOpenAI(model="gpt-4o-mini", api_key=settings.OPENAI_API_KEY, timeout=45, max_retries=1),
+                embeddings=OpenAIEmbeddings(model="text-embedding-3-small", api_key=settings.OPENAI_API_KEY,
+                                            request_timeout=45, max_retries=1),
+                run_config=RunConfig(timeout=60, max_retries=1, max_workers=2),
+                raise_exceptions=False,
             )
+            row = evaluated.to_pandas().iloc[0].to_dict()
+            raw = {"faithfulness": _score(row.get("faithfulness")),
+                   "answer_relevancy": _score(row.get("answer_relevancy")),
+                   "context_precision": _score(row.get(result["precision_metric"]))}
+            result.update({key: round(value, 3) if value is not None else None for key, value in raw.items()})
+            if ground_truth is not None:
+                recall = _score(row.get("context_recall"))
+                result["context_recall"] = round(recall, 3) if recall is not None else None
+            result["overall_score"] = compute_overall(raw)
+            result["label"] = score_to_label(result["overall_score"])
+            result["status"] = "completed" if result["overall_score"] is not None else "failed"
+    except Exception:
+        # Do not expose provider messages, credentials, prompts or source excerpts.
+        result["status"] = "failed"
+    result["evaluated_at"] = datetime.now(timezone.utc).isoformat()
+    logfire.info("RAG evaluation finished", status=result["status"], overall_score=result["overall_score"],
+                 latency_ms=(perf_counter() - started) * 1000)
+    return result
 
-            --- Extract scores ---
-            scores = result.to_pandas().iloc[0].to_dict()
-            return {
-                "faithfulness":      round(scores.get("faithfulness", 0), 3),
-                "answer_relevancy":  round(scores.get("answer_relevancy", 0), 3),
-                "context_precision": round(scores.get("context_precision", 0), 3),
-                "context_recall":    round(scores.get("context_recall", 0), 3) if ground_truth else None,
-                "overall_score":     compute_overall(scores)
-            }
 
-Step 4:  Write compute_overall(scores: dict) -> float:
-            - Weighted average: faithfulness (40%) + answer_relevancy (35%) + context_precision (25%)
-            - Return a single 0.0–1.0 score for the UI badge
-
-Step 5:  Write score_to_label(score: float) -> str:
-            - 0.8–1.0 → "Excellent"
-            - 0.6–0.8 → "Good"
-            - 0.4–0.6 → "Fair"
-            - 0.0–0.4 → "Poor"
-            - Used to display a colored badge in the frontend
-
-Step 6:  Wrap the whole evaluate_rag_response() in try/except:
-            - RAGAS calls the LLM multiple times — if it fails, return None scores gracefully
-            - Log evaluation time and scores with Logfire
-
-COST ESTIMATE:
-    ~3-5 LLM calls per evaluation (using gpt-4o-mini ≈ $0.001 per Q&A evaluation)
-    Run as a background task so it doesn't slow down the chat response
-
-WHERE THIS FITS IN THE FLOW:
-    User asks question
-         ↓
-    Agent generates answer  ← main response returned to user immediately
-         ↓ (background task)
-    RAGAS evaluates answer  ← runs async, stores scores in DB
-         ↓
-    User can view scores in UI (optional panel)
-"""
-
+async def evaluate_message(message_id: str, query: str, answer: str, contexts: list[str]) -> None:
+    """Background task: use a fresh DB session, never the request's session."""
+    try:
+        scores = await run_in_threadpool(evaluate_rag_response, query, answer, contexts)
+        async with AsyncSessionLocal() as db:
+            await crud.save_ragas_scores(db, message_id, scores)
+            await db.commit()
+    except Exception:
+        logfire.warn("Background evaluation unavailable")
+        # Best effort: mark failed even when a dependency or the worker failed.
+        try:
+            async with AsyncSessionLocal() as db:
+                await crud.save_ragas_scores(db, message_id, {"status": "failed"})
+                await db.commit()
+        except Exception:
+            logfire.warn("Could not persist evaluation status")

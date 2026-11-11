@@ -1,51 +1,60 @@
-"""
-agents/graph.py — LangGraph Agentic Workflow Definition
-=========================================================
+"""Compiled research agent with guarded entry, fatal-error exits and bounded retries."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import StateGraph, END from langgraph.graph
-Step 2:  Import AgentState from agents/state.py
-Step 3:  Import all node functions from agents/nodes/
+from functools import partial
 
-Step 4:  Create the graph:
-            graph = StateGraph(AgentState)
+from langgraph.graph import END, StateGraph
 
-Step 5:  Add all nodes to the graph:
-            graph.add_node("input_guard",      input_guard_node)
-            graph.add_node("query_analyzer",   query_analyzer_node)
-            graph.add_node("query_rewriter",   query_rewriter_node)
-            graph.add_node("multi_query",      multi_query_node)
-            graph.add_node("hyde_generator",   hyde_generator_node)
-            graph.add_node("retriever",        retriever_node)
-            graph.add_node("reranker",         reranker_node)
-            graph.add_node("synthesizer",      synthesizer_node)
-            graph.add_node("output_guard",     output_guard_node)
-            graph.add_node("citation_formatter", citation_formatter_node)
+from agents.state import AgentState
+from agents.nodes.input_guard import input_guard_node
+from agents.nodes.query_analyzer import query_analyzer_node
+from agents.nodes.query_rewriter import query_rewriter_node
+from agents.nodes.multi_query import multi_query_node
+from agents.nodes.hyde_generator import hyde_generator_node
+from agents.nodes.retriever import retriever_node
+from agents.nodes.reranker import reranker_node
+from agents.nodes.synthesizer import synthesizer_node
+from agents.nodes.output_guard import output_guard_node
+from agents.nodes.citation_formatter import citation_formatter_node
 
-Step 6:  Set entry point:
-            graph.set_entry_point("input_guard")
 
-Step 7:  Add conditional edge after input_guard:
-            - If state.is_safe == True  → go to "query_analyzer"
-            - If state.is_safe == False → go to END (return rejection message)
+def _after_input(state: AgentState) -> str:
+    return "query_analyzer" if state.get("is_safe") is True and not state.get("error") else END
 
-Step 8:  Add linear edges for the happy path:
-            query_analyzer → query_rewriter → multi_query → hyde_generator
-            → retriever → reranker → synthesizer → output_guard
 
-Step 9:  Add conditional edge after output_guard:
-            - If state.is_output_safe == True  → go to "citation_formatter" → END
-            - If state.is_output_safe == False → go back to "synthesizer" (regenerate)
-            - Add a max_retries check to avoid infinite loops
+def _next_or_end(state: AgentState, next_node: str) -> str:
+    return END if state.get("error") else next_node
 
-Step 10: Compile the graph:
-            agent = graph.compile()
 
-Step 11: Export `agent` for use in API routes
+def _after_output(state: AgentState) -> str:
+    if state.get("error"):
+        return END
+    if state.get("is_output_safe") is True:
+        return "citation_formatter"
+    limit = max(1, min(state.get("max_generation_attempts", 2), 3))
+    if state.get("generation_attempts", 0) < limit and state.get("retry_count", 0) < limit - 1:
+        return "synthesizer"
+    return END
 
-VISUALIZATION:
-            To visualize the graph during development:
-            print(agent.get_graph().draw_ascii())
-"""
 
+graph = StateGraph(AgentState)
+for name, node in (
+    ("input_guard", input_guard_node), ("query_analyzer", query_analyzer_node),
+    ("query_rewriter", query_rewriter_node), ("multi_query", multi_query_node),
+    ("hyde_generator", hyde_generator_node), ("retriever", retriever_node),
+    ("reranker", reranker_node), ("synthesizer", synthesizer_node),
+    ("output_guard", output_guard_node), ("citation_formatter", citation_formatter_node),
+):
+    graph.add_node(name, node)
+graph.set_entry_point("input_guard")
+graph.add_conditional_edges("input_guard", _after_input, {"query_analyzer": "query_analyzer", END: END})
+
+# The successful path is linear; errors terminate before further external calls.
+chain = ["query_analyzer", "query_rewriter", "multi_query", "hyde_generator",
+         "retriever", "reranker", "synthesizer", "output_guard"]
+for source, target in zip(chain, chain[1:]):
+    graph.add_conditional_edges(source, partial(_next_or_end, next_node=target), {target: target, END: END})
+graph.add_conditional_edges("output_guard", _after_output, {
+    "citation_formatter": "citation_formatter", "synthesizer": "synthesizer", END: END,
+})
+graph.add_edge("citation_formatter", END)
+agent = graph.compile()

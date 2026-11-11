@@ -12,8 +12,10 @@ from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import perf_counter
 from typing import Any
 
+import logfire
 from pinecone import Index, Pinecone, ServerlessSpec
 from pinecone_text.hybrid import hybrid_convex_scale
 from pinecone_text.sparse import BM25Encoder
@@ -192,13 +194,26 @@ def dense_search(
     _validate_vector(query_embedding)
     if type(top_k) is not int or top_k <= 0:
         raise ValueError("top_k must be a positive integer")
-    response = index.query(
+    return _query_index(index, paper_id, "dense",
         vector=query_embedding,
         filter={"paper_id": paper_id},
         top_k=top_k,
         include_metadata=True,
     )
-    return _search_results(response, paper_id)
+
+
+def _query_index(index: Index, paper_id: str, search_type: str, **kwargs: Any) -> list[dict[str, Any]]:
+    """Record search metrics without logging query text, embeddings or passages."""
+    with logfire.span("pinecone.search", search_type=search_type, top_k=kwargs["top_k"]) as span:
+        started = perf_counter()
+        try:
+            results = _search_results(index.query(**kwargs), paper_id)
+            span.set_attribute("result_count", len(results))
+            logfire.info("Pinecone search completed", search_type=search_type,
+                         latency_ms=(perf_counter() - started) * 1000, result_count=len(results))
+            return results
+        finally:
+            span.set_attribute("latency_ms", (perf_counter() - started) * 1000)
 
 
 def _search_results(response: Any, paper_id: str) -> list[dict[str, Any]]:
@@ -244,11 +259,10 @@ def hybrid_search(
     if not sparse["indices"]:
         return dense_search(index, dense_vector, paper_id, top_k)
     dense, sparse = hybrid_convex_scale(dense_vector, sparse, alpha)
-    response = index.query(
+    return _query_index(index, paper_id, "hybrid",
         vector=dense, sparse_vector=sparse, filter={"paper_id": paper_id},
         top_k=top_k, include_metadata=True,
     )
-    return _search_results(response, paper_id)
 
 
 def delete_paper_vectors(index: Index, paper_id: str) -> None:

@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import PureWindowsPath
 from uuid import UUID, uuid4
 
+import logfire
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pinecone import Index
 from pydantic import BaseModel, ConfigDict
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from core.dependencies import get_db, get_pinecone_index
+from core.exceptions import ErrorHandlingRoute
 from db import crud
 from db.database import AsyncSessionLocal
 from db.models import Paper
@@ -26,7 +28,7 @@ from utils.file_utils import (
 
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/v1/papers", tags=["Papers"])
+router = APIRouter(prefix="/api/v1/papers", tags=["Papers"], route_class=ErrorHandlingRoute)
 
 
 class UploadResponse(BaseModel):
@@ -86,8 +88,9 @@ async def process_and_index(paper_id: str, file_path: str, index: Index) -> None
                     raise ValueError("Paper is no longer awaiting processing")
                 await crud.update_paper_summary(db, paper_id, summary)
                 await crud.update_paper_status(db, paper_id, "ready")
-    except Exception:
+    except Exception as exc:
         # Do not include provider errors or document contents in API responses.
+        logfire.error("Paper processing failed", paper_id=paper_id, error_type=type(exc).__name__)
         logger.error("Paper processing failed for %s", paper_id)
         if indexing_started:
             try:

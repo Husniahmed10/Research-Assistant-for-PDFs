@@ -25,6 +25,7 @@ class AgentState(TypedDict, total=False):
     is_output_safe: bool
     output_rejection_reason: str
     generation_attempts: int
+    retry_count: int
     max_generation_attempts: int
     # Each node returns only its NEW progress messages; LangGraph accumulates them.
     steps: Annotated[list[str], operator.add]

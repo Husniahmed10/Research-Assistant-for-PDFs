@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import ChatSession, Message, Paper
+from db.models import ChatSession, Message, MessageEvaluation, Paper
 
 
 async def create_paper(
@@ -178,3 +178,24 @@ async def get_messages_for_session(
         .order_by(Message.created_at.asc(), Message.id.asc())
     )
     return list(result.all())
+
+
+async def save_ragas_scores(db: AsyncSession, message_id: str, scores: dict[str, Any]) -> MessageEvaluation | None:
+    """Save JSON-safe evaluation scores; the caller owns the transaction."""
+    status = scores.get("status", "completed" if scores.get("overall_score") is not None else "failed")
+    if status not in {"completed", "failed"}:
+        raise ValueError("Unsupported evaluation status")
+    serialized = json.dumps(scores, allow_nan=False)
+    message = await db.get(Message, message_id)
+    if message is None:  # Deletion during a background evaluation is harmless.
+        return None
+    if message.role != "assistant":
+        raise ValueError("Only assistant answers can be evaluated")
+    row = await db.get(MessageEvaluation, message_id)
+    if row is None:
+        row = MessageEvaluation(message_id=message_id)
+        db.add(row)
+    row.scores = json.loads(serialized)
+    row.status = status
+    await db.flush()
+    return row

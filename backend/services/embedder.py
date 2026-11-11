@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import logfire
 from openai import AsyncOpenAI
 
 from core.config import settings
@@ -55,12 +56,20 @@ async def embed_batch(texts: list[str]) -> list[list[float]]:
         options: dict[str, Any] = {}
         if settings.OPENAI_EMBEDDING_MODEL.startswith("text-embedding-3-"):
             options["dimensions"] = settings.PINECONE_DIMENSION
-        response = await client.embeddings.create(
-            model=settings.OPENAI_EMBEDDING_MODEL,
-            input=texts[start:end],
-            encoding_format="float",
-            **options,
-        )
+        with logfire.span("embedding.batch", model=settings.OPENAI_EMBEDDING_MODEL,
+                          input_count=end - start, estimated_tokens=total_tokens) as span:
+            response = await client.embeddings.create(
+                model=settings.OPENAI_EMBEDDING_MODEL,
+                input=texts[start:end],
+                encoding_format="float",
+                **options,
+            )
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                span.set_attribute("total_tokens", usage.total_tokens)
+            logfire.info("Embedding batch completed", model=settings.OPENAI_EMBEDDING_MODEL,
+                         input_count=end - start, estimated_tokens=total_tokens,
+                         total_tokens=getattr(usage, "total_tokens", total_tokens))
         ordered = sorted(response.data, key=lambda item: item.index)
         if [item.index for item in ordered] != list(range(end - start)):
             raise RuntimeError("Embedding response does not match the input batch")

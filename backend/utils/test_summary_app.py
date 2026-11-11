@@ -14,7 +14,8 @@ import httpx
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 
-import main
+with patch("tracing.logfire_setup.setup_logfire"), patch("tracing.langsmith_setup.setup_langsmith"):
+    import main
 from core.config import settings
 from db import database
 from services import summarizer
@@ -98,7 +99,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await database.init_db()
             async with test_engine.connect() as connection:
                 tables = await connection.run_sync(lambda conn: inspect(conn).get_table_names())
-                self.assertEqual(set(tables), {"papers", "chat_sessions", "messages"})
+                self.assertEqual(set(tables), {"papers", "chat_sessions", "messages", "message_evaluations"})
 
         with tempfile.TemporaryDirectory() as directory:
             uploads = Path(directory) / "uploads"
