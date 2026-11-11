@@ -1,31 +1,24 @@
-"""
-agents/nodes/input_guard.py — NeMo Guardrails Input Safety Check (Node 1)
-==========================================================================
+"""Node 1: validate input through NeMo input rails."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import nemoguardrails and AgentState
-Step 2:  Initialize NeMo LLMRails with config from guardrails/ folder:
-            rails_config = RailsConfig.from_path("guardrails/")
-            rails = LLMRails(rails_config)
+from agents.state import AgentState
+from agents.nodes._shared import bounded, history, update
+from services import guardrails_service
 
-Step 3:  Write input_guard_node(state: AgentState) → dict:
-            - Extract state["query"]
-            - Run the query through NeMo input rails:
-                result = await rails.generate_async(
-                    messages=[{"role": "user", "content": state["query"]}]
-                )
-            - If NeMo rails blocked the message (returned a rejection):
-                * Set state["is_safe"] = False
-                * Set state["rejection_reason"] = "Jailbreak attempt detected" / "Off-topic query"
-                * Set state["final_answer"] = NeMo's polite rejection message
-            - If safe:
-                * Set state["is_safe"] = True
-            - Append "✅ Input safety check passed" or "🚫 Input blocked" to state["steps"]
-            - Return updated state dict
 
-NOTE: NeMo uses the Colang rules defined in guardrails/main.co to decide.
-      The rails config is at guardrails/config.yml.
-      This node MUST run first before any LLM call.
-"""
-
+async def input_guard_node(state: AgentState) -> AgentState:
+    query = state.get("query", "").strip()
+    try:
+        if not query or bounded(query, 2000) != query:
+            raise ValueError("Question must contain at most 2000 tokens")
+        allowed = await guardrails_service.check_input(query, history(state))
+    except Exception:
+        return update("Input check unavailable; request stopped", is_safe=False,
+                      rejection_reason="Input validation unavailable", error="Input validation unavailable",
+                      final_answer="I couldn't validate this request. Please try again.", citations=[],
+                      is_output_safe=False, generation_attempts=0)
+    if not allowed:
+        return update("Input blocked", is_safe=False, rejection_reason="Question did not pass input checks",
+                      final_answer="I can only help with questions about the uploaded research paper.",
+                      citations=[], error="", is_output_safe=False, generation_attempts=0)
+    return update("Input safety check passed", is_safe=True, rejection_reason="", error="",
+                  final_answer="", citations=[], is_output_safe=False, generation_attempts=0)

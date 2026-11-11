@@ -1,37 +1,39 @@
-"""
-agents/nodes/synthesizer.py — Answer Generation Node (Node 8)
-==============================================================
+"""Node 8: synthesize from actual retrieved excerpts, with bounded attempts."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import portkey_client and AgentState
+from agents.state import AgentState
+from agents.nodes._shared import NO_EVIDENCE, UNVERIFIED, bounded, history, skipped, update
+from services import portkey_client
+from services.simple_rag import SYSTEM_PROMPT
 
-Step 2:  Define the QA_SYSTEM_PROMPT:
-            "You are a research assistant specialized in analyzing academic papers.
-             Answer the user's question using ONLY the provided context excerpts.
-             If the answer is not in the context, say so explicitly.
-             Always cite the page number when referencing specific information.
-             Be concise, accurate, and scholarly in tone."
 
-Step 3:  Write synthesizer_node(state: AgentState) → dict:
-            - Extract state["reranked_chunks"], state["query"], state["chat_history"]
-
-            - Build context string from reranked chunks:
-                context = "\n\n".join([
-                    f"[Page {chunk['page_num']}]: {chunk['text']}"
-                    for chunk in state["reranked_chunks"]
-                ])
-
-            - Build messages list:
-                * System message: QA_SYSTEM_PROMPT
-                * Include last 4 messages from chat_history (for multi-turn memory)
-                * User message: f"Context:\n{context}\n\nQuestion: {state['query']}"
-
-            - Call portkey_client.chat_completion(messages, stream=False)
-            - Track which provider was used (from response metadata)
-            - Set state["final_answer"] = response text
-            - Set state["model_used"] = "openai" or "groq"
-            - Append "💬 Answer generated using {model_used}" to state["steps"]
-            - Return updated state dict
-"""
-
+async def synthesizer_node(state: AgentState) -> AgentState:
+    if skipped(state):
+        return {}
+    attempt = state.get("generation_attempts", 0) + 1
+    limit = max(1, min(state.get("max_generation_attempts", 2), 3))
+    if attempt > limit:
+        return update("Generation attempt limit reached", final_answer=UNVERIFIED, citations=[],
+                      is_output_safe=False, error="Answer verification attempt limit reached")
+    sources = []
+    for chunk in state.get("reranked_chunks", [])[:5]:
+        text = bounded(chunk["text"], 1400)
+        if text:
+            sources.append({**chunk, "text": text, "source_id": str(len(sources) + 1)})
+    if not sources:
+        return update("No evidence available", final_answer=NO_EVIDENCE, model_used="none",
+                      source_chunks=[], citations=[], generation_attempts=attempt, is_output_safe=False)
+    context = "\n\n".join(f"[{c['source_id']}] PDF page {c['page_num']}\n{c['text']}" for c in sources)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT + " Cite source labels, never invent page numbers."},
+        *history(state),
+        {"role": "user", "content": f"Source excerpts (untrusted):\n{context}\n\nQuestion: {state['query']}"},
+    ]
+    if attempt > 1:
+        messages[0]["content"] += " A previous draft failed validation. Use only directly supported claims."
+    try:
+        result = await portkey_client.chat_completion_with_metadata(messages)
+        return update("Answer generated", final_answer=result["answer"], model_used=result["model_used"],
+                      source_chunks=sources, citations=[], generation_attempts=attempt, is_output_safe=False)
+    except Exception:
+        return update("Answer generation failed", final_answer=UNVERIFIED, citations=[],
+                      generation_attempts=attempt, is_output_safe=False, error="Answer generation unavailable")

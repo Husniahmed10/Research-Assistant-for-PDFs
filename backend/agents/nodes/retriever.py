@@ -1,39 +1,38 @@
-"""
-agents/nodes/retriever.py — Hybrid Search Retriever (Node 6)
-=============================================================
+"""Node 6: paper-scoped hybrid retrieval and reciprocal rank fusion."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import pinecone_client, embedder, and AgentState
+import asyncio
 
-Step 2:  Write retriever_node(state: AgentState) → dict:
+from langchain_core.runnables import RunnableConfig
+from starlette.concurrency import run_in_threadpool
 
-            --- Strategy: Run multiple queries, merge results ---
+from agents.state import AgentState
+from agents.nodes._shared import UNVERIFIED, question, skipped, update
+from core.config import settings
+from services import embedder, pinecone_client
+from utils.text_utils import apply_rrf
 
-            For each query in state["multi_queries"]:
-                a) Embed the query using embedder.embed_text(query)
-                b) Run hybrid_search() from pinecone_client:
-                    - Uses BOTH dense (OpenAI embedding) AND sparse (BM25) vectors
-                    - filter = { "paper_id": state["paper_id"] }
-                    - top_k = settings.TOP_K_RETRIEVAL (e.g., 20)
 
-            Also run a separate search using state["hyde_document"] embedding
-            (the HyDE embedding often retrieves the most relevant chunks)
-
-            --- Merge results ---
-            - Collect all retrieved chunks from all queries
-            - Deduplicate by chunk_id (a chunk retrieved by multiple queries
-              likely gets a relevance boost)
-            - Apply RRF (Reciprocal Rank Fusion) to merge ranked lists:
-                RRF score = sum(1 / (rank + k)) for each query list
-            - Sort by combined RRF score, take top TOP_K_RETRIEVAL unique chunks
-
-            --- Parent chunk expansion ---
-            - For each retrieved child chunk, fetch its parent chunk from DB
-            - LLM will receive the larger parent context
-
-            - Set state["retrieved_chunks"] = merged, deduplicated chunks
-            - Append "🔍 Retrieved {N} chunks via hybrid search" to state["steps"]
-            - Return updated state dict
-"""
-
+async def retriever_node(state: AgentState, config: RunnableConfig = None) -> AgentState:
+    if skipped(state):
+        return {}
+    try:
+        index = (config or {}).get("configurable", {}).get("pinecone_index")
+        if index is None:
+            raise ValueError("Pass the application index in config.configurable.pinecone_index")
+        queries = list(dict.fromkeys(state.get("multi_queries") or [question(state)]))[:4]
+        vectors = await embedder.embed_batch(queries)
+        searches = [(query, vector) for query, vector in zip(queries, vectors)]
+        if state.get("hyde_embedding"):
+            # Keep sparse terms tied to the question, not fabricated HyDE terms.
+            searches.append((question(state), state["hyde_embedding"]))
+        ranked_lists = await asyncio.gather(*[
+            run_in_threadpool(pinecone_client.hybrid_search, index, query, vector,
+                              state["paper_id"], settings.TOP_K_RETRIEVAL)
+            for query, vector in searches
+        ])
+        merged = apply_rrf(ranked_lists)[:settings.TOP_K_RETRIEVAL]
+        return update(f"Retrieved {len(merged)} unique chunks from {len(searches)} searches",
+                      retrieved_chunks=merged)
+    except Exception:
+        return update("Retrieval failed", retrieved_chunks=[], error="Paper retrieval unavailable",
+                      final_answer=UNVERIFIED, citations=[], is_output_safe=False)

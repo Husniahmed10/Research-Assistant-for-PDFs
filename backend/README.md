@@ -55,6 +55,39 @@ and adds `rrf_score` to dictionary results without replacing retrieval scores.
 python -m utils.test_reranking
 ```
 
+## Agent state and nodes
+
+`agents/state.py` defines the optional state fields and an additive `steps`
+reducer. Nodes return partial updates and only their new progress messages.
+The ten node modules implement input validation, classification, rewriting,
+query expansion, HyDE, hybrid retrieval/RRF, reranking, synthesis, output
+validation, and source formatting.
+
+Pass the application index through LangGraph runtime configuration, not state:
+
+```python
+config = {"configurable": {"pinecone_index": app.state.pinecone_index}}
+```
+
+The NeMo Colang configuration in `guardrails/` runs input/output checks through
+Portkey custom actions. Dialogue generation and intent search are disabled for
+this validation-only runtime. Failed or ambiguous checks block the request or
+withhold the answer. HyDE passages are retrieval aids and never become source
+evidence. Citations use the actual excerpts supplied to synthesis.
+
+The graph assembly is a separate step; the chat API currently uses simple RAG.
+When assembling the graph, terminate on `error` or rejected input, retry unsafe
+output only while the generation budget remains, and format citations only
+after `is_output_safe` is true. The default synthesis budget is two attempts,
+with a maximum supported budget of three.
+
+```powershell
+python -m utils.test_agent_nodes
+```
+
+Tests execute all ten nodes, the real NeMo/Colang runtime, and a small LangGraph
+configuration/reducer check. Provider calls are mocked and test tracing disabled.
+
 ## 🗂️ Folder Structure
 
 ```

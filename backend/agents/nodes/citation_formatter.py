@@ -1,30 +1,32 @@
-"""
-agents/nodes/citation_formatter.py — Citation Extraction & Formatting (Node 10)
-=================================================================================
+"""Node 10: attach only verified source/page references."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import AgentState
+import re
 
-Step 2:  Write citation_formatter_node(state: AgentState) → dict:
-            - Extract state["reranked_chunks"] and state["final_answer"]
+from agents.state import AgentState
+from agents.nodes._shared import UNVERIFIED, skipped, update
 
-            - For each chunk in reranked_chunks:
-                * Extract: page_num, a short snippet (first 100 chars of chunk text)
-                * Build citation dict: { "page": page_num, "snippet": snippet, "chunk_id": id }
 
-            - Deduplicate citations by page number
-
-            - Append citation references to the final_answer:
-                e.g., add a "Sources:" section at the bottom:
-                "📚 Sources: Page 3, Page 7, Page 12"
-
-            - Set state["citations"] = list of citation dicts
-            - Set state["final_answer"] = answer + formatted citation footer
-            - Append "📌 Citations attached" to state["steps"]
-            - Return updated state dict
-
-NOTE: The frontend uses state["citations"] to display highlighted source panels.
-      Each citation links back to the specific page of the uploaded PDF.
-"""
-
+async def citation_formatter_node(state: AgentState) -> AgentState:
+    if skipped(state):
+        return {}
+    if state.get("is_output_safe") is not True:
+        return update("Citations withheld for unverified answer", citations=[], final_answer=UNVERIFIED)
+    answer = re.sub(r"\n\nSources: Page \d+(?:, Page \d+)*$", "", state.get("final_answer", ""))
+    sources = {chunk["source_id"]: chunk for chunk in state.get("source_chunks", [])}
+    references = list(dict.fromkeys(re.findall(r"\[(\d+)\]", answer)))
+    if any(reference not in sources for reference in references):
+        return update("Invalid citation blocked", citations=[], final_answer=UNVERIFIED,
+                      is_output_safe=False, error="Answer contains an unknown source reference")
+    pages = {}
+    for reference in references:
+        chunk = sources[reference]
+        page = int(chunk["page_num"])
+        if page not in pages:
+            pages[page] = {"page": page, "page_num": page, "id": reference,
+                           "chunk_id": chunk["chunk_id"], "snippet": chunk["text"][:100],
+                           "source_ids": [], "chunk_ids": []}
+        pages[page]["source_ids"].append(reference)
+        pages[page]["chunk_ids"].append(chunk["chunk_id"])
+    if pages:
+        answer += "\n\nSources: " + ", ".join(f"Page {page}" for page in pages)
+    return update("Verified citations attached", citations=list(pages.values()), final_answer=answer)
