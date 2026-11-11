@@ -12,7 +12,7 @@ from api.routes.papers import router as papers_router
 from api.routes.chat import router as chat_router
 from core.config import settings
 from db.database import engine, init_db
-from services.pinecone_client import init_pinecone_index
+from services.pinecone_client import init_pinecone_index, load_bm25_encoders
 
 
 @asynccontextmanager
@@ -22,6 +22,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
         await init_db()
+        await run_in_threadpool(load_bm25_encoders)
         app.state.pinecone_index = await run_in_threadpool(init_pinecone_index)
         yield
     finally:

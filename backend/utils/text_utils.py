@@ -1,7 +1,9 @@
 """Text normalization, token budgeting, and research-paper heading detection."""
 
 import re
+import math
 import unicodedata
+from typing import Any
 
 import tiktoken
 
@@ -67,3 +69,41 @@ def extract_section_headers(text: str) -> list[str]:
     text = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
     return [" ".join(match.group("header").split()).title()
             for match in _SECTION_PATTERN.finditer(text)]
+
+
+def apply_rrf(
+    ranked_lists: list[list[str | dict[str, Any]]], k: float = 60
+) -> list[str | dict[str, Any]]:
+    """Fuse ranked document IDs or chunks using 1 / (k + one-based rank).
+
+    Chunks are identified by chunk_id (or id); strings are document IDs. Count
+    each ID once per input list. Preserve the first representation/metadata and
+    break ties by first appearance. Dictionary results gain rrf_score; inputs
+    and their original retrieval scores are never modified.
+    """
+    if isinstance(k, bool) or not isinstance(k, (int, float)) or not math.isfinite(k) or k < 0:
+        raise ValueError("k must be a finite, non-negative number")
+    scores: dict[str, float] = {}
+    documents: dict[str, str | dict[str, Any]] = {}
+    for ranked in ranked_lists:
+        seen = set()
+        for rank, document in enumerate(ranked, start=1):
+            if isinstance(document, str):
+                document_id = document
+            elif isinstance(document, dict):
+                document_id = document.get("chunk_id") or document.get("id")
+            else:
+                raise ValueError("Documents must be string IDs or dictionaries")
+            if not isinstance(document_id, str) or not document_id.strip():
+                raise ValueError("Each document must have a non-empty string ID")
+            if document_id in seen:
+                continue
+            seen.add(document_id)
+            documents.setdefault(document_id, document)
+            scores[document_id] = scores.get(document_id, 0.0) + 1.0 / (rank + k)
+    ordered_ids = sorted(scores, key=lambda document_id: -scores[document_id])
+    return [
+        {**documents[document_id], "rrf_score": scores[document_id]}
+        if isinstance(documents[document_id], dict) else documents[document_id]
+        for document_id in ordered_ids
+    ]

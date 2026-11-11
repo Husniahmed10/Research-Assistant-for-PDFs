@@ -143,11 +143,11 @@ class RAGTests(unittest.IsolatedAsyncioTestCase):
                    {"role": "user", "content": "Earlier question"},
                    {"role": "assistant", "content": "Earlier answer"}]
         with patch.object(rag, "embed_text", AsyncMock(return_value=[1, 0])) as embed, \
-                patch.object(rag, "dense_search", return_value=self.chunks) as search, \
+                patch.object(rag, "hybrid_search", return_value=self.chunks) as search, \
                 patch.object(rag.portkey_client, "chat_completion_with_metadata", AsyncMock(return_value={"answer": "Evidence [1].", "model_used": "test-model"})) as chat:
             result = await rag.simple_rag("What are the findings?", "paper-a", history, self.index)
         embed.assert_awaited_once_with("What are the findings?")
-        search.assert_called_once_with(self.index, [1, 0], "paper-a", 10)
+        search.assert_called_once_with(self.index, "What are the findings?", [1, 0], "paper-a", 10)
         self.assertEqual(result["answer"], "Evidence [1].")
         self.assertEqual(len(result["chunks_used"]), 5)
         messages = chat.call_args.args[0]
@@ -158,7 +158,7 @@ class RAGTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_retrieval_skips_generation(self):
         with patch.object(rag, "embed_text", AsyncMock(return_value=[1, 0])), \
-                patch.object(rag, "dense_search", return_value=[]), \
+                patch.object(rag, "hybrid_search", return_value=[]), \
                 patch.object(rag.portkey_client, "chat_completion_with_metadata", AsyncMock()) as chat:
             result = await rag.simple_rag("Findings?", "paper-a", [], self.index)
         self.assertEqual(result["chunks_used"], [])
@@ -167,7 +167,7 @@ class RAGTests(unittest.IsolatedAsyncioTestCase):
     async def test_long_context_uses_exact_truncated_excerpts(self):
         self.chunks[0]["text"] = " research" * 3000
         with patch.object(rag, "embed_text", AsyncMock(return_value=[1, 0])), \
-                patch.object(rag, "dense_search", return_value=self.chunks), \
+                patch.object(rag, "hybrid_search", return_value=self.chunks), \
                 patch.object(rag.portkey_client, "chat_completion_with_metadata", AsyncMock(return_value={"answer": "Answer", "model_used": "test-model"})) as chat:
             result = await rag.simple_rag("Findings?", "paper-a", [{"role": "user", "content": " earlier" * 5000}], self.index)
         excerpt = result["chunks_used"][0]["text"]

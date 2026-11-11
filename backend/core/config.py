@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     PINECONE_ENVIRONMENT: str = "us-east-1"
     PINECONE_DIMENSION: int = 1536
     COHERE_API_KEY: str = Field(default="", repr=False)
+    COHERE_RERANK_MODEL: str = "rerank-english-v3.0"
+    FLASHRANK_MODEL: str = "ms-marco-TinyBERT-L-2-v2"
+    FLASHRANK_CACHE_DIR: str = ".cache/flashrank"
 
     # Persistence
     DATABASE_URL: str = Field(

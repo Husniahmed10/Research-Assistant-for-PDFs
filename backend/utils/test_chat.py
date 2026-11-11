@@ -4,6 +4,7 @@ Full upload-to-answer API flow with real PDF parsing/SQLite and mocked providers
 """
 
 import unittest
+import re
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -19,7 +20,13 @@ from utils.test_papers import PaperAPIFixture
 class ChatAPITests(PaperAPIFixture):
     async def asyncSetUp(self):
         await super().asyncSetUp()
-        self.chat_mock = AsyncMock(return_value={"answer": "It works. [2]", "model_used": "groq-test-model"})
+        async def answer_from_sources(messages):
+            prompt = messages[-1]["content"]
+            source = re.search(r"\[(\d+)\] PDF page \d+\nConclusion", prompt)
+            label = source.group(1) if source else "1"
+            return {"answer": f"It works. [{label}]", "model_used": "groq-test-model"}
+
+        self.chat_mock = AsyncMock(side_effect=answer_from_sources)
         self.chat_patches = [
             patch.object(rag, "embed_text", AsyncMock(return_value=[0.1] * settings.PINECONE_DIMENSION)),
             patch.object(rag.portkey_client, "chat_completion_with_metadata", self.chat_mock),
@@ -54,10 +61,10 @@ class ChatAPITests(PaperAPIFixture):
         self.assertEqual(response.status_code, 200, response.text)
         answer = response.json()
         self.assertEqual(answer["model_used"], "groq-test-model")
-        self.assertEqual(answer["answer"], "It works. [2]")
+        self.assertIn("It works.", answer["answer"])
         self.assertGreaterEqual(answer["latency_ms"], 0)
         self.assertEqual(len(answer["citations"]), 1)
-        self.assertEqual(answer["citations"][0]["id"], "2")
+        self.assertIn(f"[{answer['citations'][0]['id']}]", answer["answer"])
         self.assertEqual(answer["citations"][0]["page_num"], 1)
         self.assertIn("It works.", answer["citations"][0]["text"])
         self.assertEqual((await self.history(session_id)).status_code, 200)
@@ -77,8 +84,11 @@ class ChatAPITests(PaperAPIFixture):
         other = await self.client.post("/api/v1/chat/sessions", json={"paper_id": paper_id})
         other_id = other.json()["session_id"]
         await self.ask(other_id, "Other session secret")
+        answers = []
         for query in ("First question", "Second question", "Third question"):
-            self.assertEqual((await self.ask(session_id, query)).status_code, 200)
+            response = await self.ask(session_id, query)
+            self.assertEqual(response.status_code, 200)
+            answers.append(response.json()["answer"])
         with patch.object(chat, "simple_rag", AsyncMock(return_value={
             "answer": "Follow-up", "chunks_used": [], "model_used": "test",
         })) as mocked:
@@ -86,7 +96,7 @@ class ChatAPITests(PaperAPIFixture):
         self.assertEqual(mocked.call_args.args[1], paper_id)
         history = mocked.call_args.args[2]
         self.assertEqual([message["content"] for message in history], [
-            "Second question", "It works. [2]", "Third question", "It works. [2]",
+            "Second question", answers[1], "Third question", answers[2],
         ])
         self.assertEqual(len((await self.history(session_id)).json()), 8)
 
@@ -117,6 +127,7 @@ class ChatAPITests(PaperAPIFixture):
 
     async def test_invalid_citation_saves_neither_message(self):
         _, session_id = await self.ready_session()
+        self.chat_mock.side_effect = None
         self.chat_mock.return_value = {"answer": "Invented source [999]", "model_used": "test"}
         self.assertEqual((await self.ask(session_id)).status_code, 502)
         self.assertEqual((await self.history(session_id)).json(), [])

@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 from core.config import settings
 from services import portkey_client
 from services.embedder import embed_text
-from services.pinecone_client import dense_search
+from services.pinecone_client import hybrid_search
 from utils.text_utils import count_tokens, truncate_to_tokens
 
 
@@ -45,7 +45,7 @@ async def simple_rag(
     if count_tokens(query, token_model) > 2000:
         raise ValueError("Question exceeds the 2000-token limit")
     query_embedding = await embed_text(query)
-    chunks = await run_in_threadpool(dense_search, index, query_embedding, paper_id, 10)
+    chunks = await run_in_threadpool(hybrid_search, index, query, query_embedding, paper_id, 10)
     if not chunks:
         return {"answer": _NO_EVIDENCE, "chunks_used": [], "model_used": "none"}
 

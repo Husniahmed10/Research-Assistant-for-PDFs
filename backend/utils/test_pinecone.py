@@ -4,6 +4,8 @@ Uses mocked control-plane calls and an in-memory fake index; no cloud requests.
 """
 
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -29,10 +31,14 @@ class FakeIndex:
     def upsert(self, vectors):
         self.records.update({vector["id"]: vector for vector in vectors})
 
-    def query(self, vector, filter, top_k, include_metadata):
+    def query(self, vector, filter, top_k, include_metadata, sparse_vector=None):
+        sparse_query = dict(zip(sparse_vector["indices"], sparse_vector["values"])) if sparse_vector else {}
         matches = [
             {"id": key, "metadata": row["metadata"],
-             "score": sum(a * b for a, b in zip(vector, row["values"]))}
+             "score": sum(a * b for a, b in zip(vector, row["values"]))
+             + sum(sparse_query.get(i, 0) * value for i, value in zip(
+                 row.get("sparse_values", {}).get("indices", []),
+                 row.get("sparse_values", {}).get("values", [])))}
             for key, row in self.records.items()
             if row["metadata"]["paper_id"] == filter["paper_id"]
         ]
@@ -47,6 +53,12 @@ class FakeIndex:
 
 class PineconeTests(unittest.TestCase):
     def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        storage = patch.object(settings, "UPLOAD_DIR", self.directory.name)
+        storage.start()
+        self.addCleanup(storage.stop)
+        service._load_bm25.cache_clear()
         self.dimension = patch.object(settings, "PINECONE_DIMENSION", 3)
         self.dimension.start()
         self.addCleanup(self.dimension.stop)
@@ -106,7 +118,8 @@ class PineconeTests(unittest.TestCase):
         self.assertEqual(service.upsert_chunks(index, [chunk(i) for i in range(205)], "paper-a"), 205)
         self.assertEqual([len(call.kwargs["vectors"]) for call in index.upsert.call_args_list], [100, 100, 5])
         first = index.upsert.call_args_list[0].kwargs["vectors"][0]
-        self.assertEqual(first, {
+        self.assertTrue(first["sparse_values"]["indices"])
+        self.assertEqual({key: value for key, value in first.items() if key != "sparse_values"}, {
             "id": "chunk-0", "values": [1.0, 0.0, 0.0],
             "metadata": {"paper_id": "paper-a", "text": "Evidence 0", "page_num": 1, "chunk_index": 0},
         })

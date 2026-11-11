@@ -27,6 +27,7 @@ ENV/
 *.db
 *.sqlite
 *.sqlite3
+bm25_params.json
 
 # Uploaded Files (don't commit user uploads)
 uploads/*
@@ -38,6 +39,7 @@ logs/
 
 # Testing
 .pytest_cache/
+.cache/
 .coverage
 htmlcov/
 coverage.xml
