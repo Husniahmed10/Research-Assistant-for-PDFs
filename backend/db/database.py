@@ -1,20 +1,24 @@
-"""
-db/database.py — SQLAlchemy Async Database Setup
-==================================================
+"""Async database engine, session factory, and model base."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import create_async_engine, AsyncSession, declarative_base from SQLAlchemy
-Step 2:  Read DATABASE_URL from settings (e.g., sqlite+aiosqlite:///./research_assistant.db)
-Step 3:  Create async engine:
-            engine = create_async_engine(DATABASE_URL, echo=settings.DEBUG)
-Step 4:  Create AsyncSessionLocal factory:
-            AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
-Step 5:  Create Base = declarative_base() — all models will inherit from this
-Step 6:  Write an async `init_db()` function:
-            - Calls Base.metadata.create_all(bind=engine)
-            - Creates all tables if they don't exist
-            - Called at app startup in main.py
-Step 7:  Export: engine, AsyncSessionLocal, Base, init_db
-"""
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
 
+from core.config import settings
+
+
+engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine, class_=AsyncSession, expire_on_commit=False
+)
+
+
+class Base(DeclarativeBase):
+    """Base class for database models."""
+
+
+async def init_db() -> None:
+    """Create registered model tables; call during application startup."""
+    from db import models  # noqa: F401 -- register model tables with Base.metadata
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
