@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # Gateway
     PORTKEY_API_KEY: str = Field(default="", repr=False)
+    PORTKEY_CONFIG_ID: str = ""
     PORTKEY_VIRTUAL_KEY_OPENAI: str = Field(default="", repr=False)
     PORTKEY_VIRTUAL_KEY_GROQ: str = Field(default="", repr=False)
 
