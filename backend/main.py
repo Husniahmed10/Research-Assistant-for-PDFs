@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from api.routes.papers import router as papers_router
+from api.routes.chat import router as chat_router
 from core.config import settings
 from db.database import engine, init_db
 from services.pinecone_client import init_pinecone_index
@@ -37,6 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(papers_router)
+app.include_router(chat_router)
 
 
 @app.get("/")

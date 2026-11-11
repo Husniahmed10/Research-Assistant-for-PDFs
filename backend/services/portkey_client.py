@@ -91,6 +91,13 @@ async def chat_completion(
     _validate_messages(messages)
     if stream:
         return "".join([token async for token in stream_completion(messages)]).strip()
+    result = await chat_completion_with_metadata(messages)
+    return result["answer"]
+
+
+async def chat_completion_with_metadata(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """Return answer and the actual response model, including fallback results."""
+    _validate_messages(messages)
     async with _gateway() as gateway:
         response = await gateway.chat.completions.create(
             model=settings.OPENAI_MODEL, messages=messages, stream=False, max_tokens=2048,
@@ -107,7 +114,7 @@ async def chat_completion(
         content = choice.message.content
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("Gateway returned an empty text completion")
-        return content.strip()
+        return {"answer": content.strip(), "model_used": response.model or "unknown"}
 
 
 async def stream_completion(messages: list[dict[str, Any]]) -> AsyncIterator[str]:

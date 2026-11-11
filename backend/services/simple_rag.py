@@ -47,7 +47,7 @@ async def simple_rag(
     query_embedding = await embed_text(query)
     chunks = await run_in_threadpool(dense_search, index, query_embedding, paper_id, 10)
     if not chunks:
-        return {"answer": _NO_EVIDENCE, "chunks_used": []}
+        return {"answer": _NO_EVIDENCE, "chunks_used": [], "model_used": "none"}
 
     sources = []
     chunks_used = []
@@ -59,7 +59,7 @@ async def simple_rag(
         sources.append(f"[{source_id}] PDF page {chunk['page_num']}\n{text}")
         chunks_used.append({**chunk, "text": text, "source_id": source_id})
     if not sources:
-        return {"answer": _NO_EVIDENCE, "chunks_used": []}
+        return {"answer": _NO_EVIDENCE, "chunks_used": [], "model_used": "none"}
 
     # Never allow caller-supplied system/tool messages to become instructions.
     history = []
@@ -86,5 +86,5 @@ async def simple_rag(
             + f"\n\nQuestion: {query}\nAnswer using only the source excerpts."
         )},
     ]
-    answer = await portkey_client.chat_completion(messages)
-    return {"answer": answer, "chunks_used": chunks_used}
+    completion = await portkey_client.chat_completion_with_metadata(messages)
+    return {**completion, "chunks_used": chunks_used}

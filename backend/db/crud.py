@@ -125,6 +125,11 @@ async def get_sessions_for_paper(
     return list(result.all())
 
 
+async def get_session(db: AsyncSession, session_id: str) -> ChatSession | None:
+    """Return a conversation by ID, or None if it does not exist."""
+    return await db.get(ChatSession, session_id)
+
+
 async def add_message(
     db: AsyncSession,
     session_id: str,
@@ -154,9 +159,19 @@ async def add_message(
 
 
 async def get_messages_for_session(
-    db: AsyncSession, session_id: str
+    db: AsyncSession, session_id: str, limit: int | None = None
 ) -> list[Message]:
-    """Return chat history oldest first with a stable tie-breaker."""
+    """Return history chronologically, optionally restricted to the latest N."""
+    if limit is not None:
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        result = await db.scalars(
+            select(Message)
+            .where(Message.session_id == session_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit)
+        )
+        return list(reversed(result.all()))
     result = await db.scalars(
         select(Message)
         .where(Message.session_id == session_id)

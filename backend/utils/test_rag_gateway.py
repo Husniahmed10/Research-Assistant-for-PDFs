@@ -77,6 +77,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["messages"], [{"role": "user", "content": "Hello!"}])
         self.assertTrue(self.clients[0].is_closed)
 
+    async def test_metadata_reports_actual_response_model(self):
+        with self.gateway_patch:
+            result = await gateway.chat_completion_with_metadata([{"role": "user", "content": "Hello!"}])
+        self.assertEqual(result, {"answer": "Hello world", "model_used": "test-groq-model"})
+
     async def test_stream_yields_deltas_and_full_string_option(self):
         with self.gateway_patch:
             tokens = [token async for token in gateway.stream_completion([{"role": "user", "content": "Hello!"}])]
@@ -139,7 +144,7 @@ class RAGTests(unittest.IsolatedAsyncioTestCase):
                    {"role": "assistant", "content": "Earlier answer"}]
         with patch.object(rag, "embed_text", AsyncMock(return_value=[1, 0])) as embed, \
                 patch.object(rag, "dense_search", return_value=self.chunks) as search, \
-                patch.object(rag.portkey_client, "chat_completion", AsyncMock(return_value="Evidence [1].")) as chat:
+                patch.object(rag.portkey_client, "chat_completion_with_metadata", AsyncMock(return_value={"answer": "Evidence [1].", "model_used": "test-model"})) as chat:
             result = await rag.simple_rag("What are the findings?", "paper-a", history, self.index)
         embed.assert_awaited_once_with("What are the findings?")
         search.assert_called_once_with(self.index, [1, 0], "paper-a", 10)
@@ -154,7 +159,7 @@ class RAGTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_retrieval_skips_generation(self):
         with patch.object(rag, "embed_text", AsyncMock(return_value=[1, 0])), \
                 patch.object(rag, "dense_search", return_value=[]), \
-                patch.object(rag.portkey_client, "chat_completion", AsyncMock()) as chat:
+                patch.object(rag.portkey_client, "chat_completion_with_metadata", AsyncMock()) as chat:
             result = await rag.simple_rag("Findings?", "paper-a", [], self.index)
         self.assertEqual(result["chunks_used"], [])
         chat.assert_not_awaited()
@@ -163,7 +168,7 @@ class RAGTests(unittest.IsolatedAsyncioTestCase):
         self.chunks[0]["text"] = " research" * 3000
         with patch.object(rag, "embed_text", AsyncMock(return_value=[1, 0])), \
                 patch.object(rag, "dense_search", return_value=self.chunks), \
-                patch.object(rag.portkey_client, "chat_completion", AsyncMock(return_value="Answer")) as chat:
+                patch.object(rag.portkey_client, "chat_completion_with_metadata", AsyncMock(return_value={"answer": "Answer", "model_used": "test-model"})) as chat:
             result = await rag.simple_rag("Findings?", "paper-a", [{"role": "user", "content": " earlier" * 5000}], self.index)
         excerpt = result["chunks_used"][0]["text"]
         self.assertLessEqual(count_tokens(excerpt), 1400)
