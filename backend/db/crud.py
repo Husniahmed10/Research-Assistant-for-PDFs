@@ -21,15 +21,21 @@ async def create_paper(
     file_size_kb: float,
     page_count: int | None = None,
     full_text: str | None = None,
+    *,
+    paper_id: str | None = None,
+    status: str = "uploading",
 ) -> Paper:
-    """Insert a paper with its initial uploading status."""
+    """Insert a paper, optionally using an upload's pre-generated ID/status."""
+    if status not in {"uploading", "processing", "ready", "failed"}:
+        raise ValueError("Unsupported paper status")
     paper = Paper(
+        id=paper_id,
         filename=filename,
         file_path=file_path,
         file_size_kb=file_size_kb,
         page_count=page_count,
         full_text=full_text,
-        status="uploading",
+        status=status,
     )
     db.add(paper)
     await db.flush()

@@ -8,6 +8,8 @@ Usage::
 
 from collections.abc import AsyncIterator
 
+from fastapi import HTTPException, Request
+from pinecone import Index
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import Settings, settings
@@ -27,3 +29,11 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 def get_settings() -> Settings:
     """Return the shared application settings instance."""
     return settings
+
+
+def get_pinecone_index(request: Request) -> Index:
+    """Return the index initialized during this application's startup."""
+    index = getattr(request.app.state, "pinecone_index", None)
+    if index is None:
+        raise HTTPException(status_code=503, detail="Vector index is not available")
+    return index
