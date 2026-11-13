@@ -1,24 +1,24 @@
-"""
-agents/nodes/reranker.py — Cohere Reranker Node (Node 7)
-=========================================================
+"""Node 7: rerank fused candidates using Cohere or local FlashRank."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import reranker service and AgentState
+from starlette.concurrency import run_in_threadpool
 
-Step 2:  Write reranker_node(state: AgentState) → dict:
-            - Extract state["retrieved_chunks"] and state["query"]
-            - Call reranker.rerank_chunks(
-                  query=state["rewritten_query"],
-                  chunks=state["retrieved_chunks"],
-                  top_n=settings.TOP_K_RERANK   # typically 5
-              )
-            - Set state["reranked_chunks"] = top 5 chunks
-            - Append "🏆 Reranked to top {N} most relevant chunks" to state["steps"]
-            - Return updated state dict
+from agents.state import AgentState
+from agents.nodes._shared import UNVERIFIED, question, skipped, update
+from core.config import settings
+from services import reranker
 
-NOTE: This is the final retrieval step before LLM generation.
-      The LLM will ONLY see these top-N chunks as context.
-      This prevents "lost in the middle" problem (too much context dilutes attention).
-"""
 
+async def reranker_node(state: AgentState) -> AgentState:
+    if skipped(state):
+        return {}
+    chunks = state.get("retrieved_chunks", [])
+    if not chunks:
+        return update("No retrieved chunks to rerank", reranked_chunks=[])
+    try:
+        ranked = await run_in_threadpool(
+            reranker.rerank_chunks, question(state), chunks, settings.TOP_K_RERANK
+        )
+        return update(f"Reranked to {len(ranked)} chunks", reranked_chunks=ranked)
+    except Exception:
+        return update("Reranking failed", reranked_chunks=[], error="Reranking unavailable",
+                      final_answer=UNVERIFIED, citations=[], is_output_safe=False)

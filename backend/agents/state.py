@@ -1,38 +1,35 @@
-"""
-agents/state.py — LangGraph Agent State Definition
-====================================================
+"""Partial state updates shared by the research-paper agent nodes."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Import TypedDict, Annotated, List from typing
-Step 2:  Import operator for list reduction
+import operator
+from typing import Annotated, Any
+from typing_extensions import TypedDict
 
-Step 3:  Define AgentState(TypedDict) — this is the shared state passed between all nodes:
-            Fields:
-            - query: str                       → original user question
-            - paper_id: str                    → which paper to search
-            - session_id: str                  → chat session for history
-            - chat_history: list[dict]         → previous messages (role + content)
 
-            - is_safe: bool                    → set by input_guard node
-            - rejection_reason: str            → why query was rejected (if unsafe)
-
-            - query_type: str                  → "factual" | "summary" | "comparative" | "definition"
-            - rewritten_query: str             → improved query from query_rewriter node
-            - multi_queries: list[str]         → 3 query variants from multi_query node
-            - hyde_document: str               → hypothetical answer from hyde_generator node
-
-            - retrieved_chunks: list[dict]     → raw results from pinecone hybrid search
-            - reranked_chunks: list[dict]      → top-N after Cohere reranking
-
-            - final_answer: str                → generated answer from synthesizer node
-            - citations: list[dict]            → page numbers + snippets used
-            - model_used: str                  → "openai" or "groq"
-            - is_output_safe: bool             → set by output_guard node
-
-            - steps: list[str]                 → track which nodes ran (for UI display)
-            - error: str                       → any error message
-
-Step 4:  Export AgentState for use in graph.py and all node files
-"""
-
+class AgentState(TypedDict, total=False):
+    query: str
+    paper_id: str
+    session_id: str
+    chat_history: list[dict[str, Any]]
+    user_name: str | None  # User-supplied display name, scoped to this SQL session.
+    studio_context_key: str  # Studio-only scope for checkpointed conversation context.
+    is_safe: bool
+    rejection_reason: str
+    query_type: str
+    rewritten_query: str
+    multi_queries: list[str]
+    hyde_document: str
+    hyde_embedding: list[float]
+    retrieved_chunks: list[dict[str, Any]]
+    reranked_chunks: list[dict[str, Any]]
+    source_chunks: list[dict[str, Any]]  # Exact, bounded excerpts sent to the LLM.
+    final_answer: str
+    citations: list[dict[str, Any]]
+    model_used: str  # Actual response model, including gateway fallback models.
+    is_output_safe: bool
+    output_rejection_reason: str
+    generation_attempts: int
+    retry_count: int
+    max_generation_attempts: int
+    # Each node returns only its NEW progress messages; LangGraph accumulates them.
+    steps: Annotated[list[str], operator.add]
+    error: str

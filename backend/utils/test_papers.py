@@ -14,7 +14,8 @@ import fitz
 import httpx
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import main
+with patch("tracing.logfire_setup.setup_logfire"), patch("tracing.langsmith_setup.setup_langsmith"):
+    import main
 from api.routes import papers
 from core.config import settings
 from core.dependencies import get_db, get_pinecone_index
@@ -24,7 +25,7 @@ from utils.test_pinecone import FakeIndex
 from starlette.requests import Request
 
 
-class PaperAPITests(unittest.IsolatedAsyncioTestCase):
+class PaperAPIFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.uploads = Path(self.directory.name) / "uploads"
@@ -82,6 +83,8 @@ class PaperAPITests(unittest.IsolatedAsyncioTestCase):
             files={"file": ("example.pdf", self.pdf if data is None else data, mime)},
         )
 
+
+class PaperAPITests(PaperAPIFixture):
     async def test_upload_summary_list_and_delete(self):
         response = await self.upload()
         self.assertEqual(response.status_code, 202, response.text)

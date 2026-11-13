@@ -80,3 +80,20 @@ class Message(Base):
     created_at = Column(DateTime, nullable=False, default=_utc_now)
 
     session = relationship("ChatSession", back_populates="messages")
+    evaluation = relationship(
+        "MessageEvaluation", back_populates="message", uselist=False,
+        cascade="all, delete-orphan", lazy="selectin",
+    )
+
+
+class MessageEvaluation(Base):
+    """Optional scores in a separate table, compatible with existing messages."""
+
+    __tablename__ = "message_evaluations"
+
+    message_id = Column(String(36), ForeignKey("messages.id"), primary_key=True)
+    status = Column(String(20), nullable=False, default="pending")
+    scores = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+
+    message = relationship("Message", back_populates="evaluation")

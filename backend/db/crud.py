@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import ChatSession, Message, Paper
+from db.models import ChatSession, Message, MessageEvaluation, Paper
 
 
 async def create_paper(
@@ -125,6 +125,11 @@ async def get_sessions_for_paper(
     return list(result.all())
 
 
+async def get_session(db: AsyncSession, session_id: str) -> ChatSession | None:
+    """Return a conversation by ID, or None if it does not exist."""
+    return await db.get(ChatSession, session_id)
+
+
 async def add_message(
     db: AsyncSession,
     session_id: str,
@@ -154,12 +159,51 @@ async def add_message(
 
 
 async def get_messages_for_session(
-    db: AsyncSession, session_id: str
+    db: AsyncSession, session_id: str, limit: int | None = None
 ) -> list[Message]:
-    """Return chat history oldest first with a stable tie-breaker."""
+    """Return history chronologically, optionally restricted to the latest N."""
+    if limit is not None:
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        result = await db.scalars(
+            select(Message)
+            .where(Message.session_id == session_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit)
+        )
+        return list(reversed(result.all()))
     result = await db.scalars(
         select(Message)
         .where(Message.session_id == session_id)
         .order_by(Message.created_at.asc(), Message.id.asc())
     )
     return list(result.all())
+
+
+async def save_ragas_scores(db: AsyncSession, message_id: str, scores: dict[str, Any]) -> MessageEvaluation | None:
+    """Save JSON-safe evaluation scores; the caller owns the transaction."""
+    status = scores.get("status", "completed" if scores.get("overall_score") is not None else "failed")
+    if status not in {"completed", "failed"}:
+        raise ValueError("Unsupported evaluation status")
+    serialized = json.dumps(scores, allow_nan=False)
+    message = await db.get(Message, message_id)
+    if message is None:  # Deletion during a background evaluation is harmless.
+        return None
+    if message.role != "assistant":
+        raise ValueError("Only assistant answers can be evaluated")
+    row = await db.get(MessageEvaluation, message_id)
+    if row is None:
+        row = MessageEvaluation(message_id=message_id)
+        db.add(row)
+    row.scores = json.loads(serialized)
+    row.status = status
+    await db.flush()
+    return row
+
+
+async def get_user_message_texts(db: AsyncSession, session_id: str) -> list[str]:
+    """Read only this session's user text for targeted conversation recall."""
+    rows = await db.scalars(select(Message.content).where(
+        Message.session_id == session_id, Message.role == "user",
+    ).order_by(Message.created_at, Message.id))
+    return list(rows.all())

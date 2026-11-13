@@ -1,67 +1,92 @@
-"""
-api/routes/evaluation.py — RAGAS Evaluation Routes
-====================================================
+"""Read persisted RAGAS scores; GET requests never invoke a paid evaluator."""
 
-STEP-BY-STEP IMPLEMENTATION PLAN:
------------------------------------
-Step 1:  Create APIRouter with prefix="/api/v1/evaluation", tags=["Evaluation"]
+from collections import Counter
+from uuid import UUID
 
---- Route 1: GET /messages/{message_id} ---
-Step 2:  GET /messages/{message_id} — Get RAGAS scores for a specific message:
-            - Fetch message from DB
-            - Return its ragas_scores JSON field:
-                {
-                  "faithfulness":      0.91,
-                  "answer_relevancy":  0.87,
-                  "context_precision": 0.79,
-                  "context_recall":    null,
-                  "overall_score":     0.86,
-                  "label":             "Excellent",
-                  "evaluated_at":      "2024-11-11T10:30:00"
-                }
-            - Return 404 if scores not yet computed (evaluation still running)
-            - Return 202 if still pending (background task not done yet)
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
---- Route 2: GET /sessions/{session_id}/summary ---
-Step 3:  GET /sessions/{session_id}/summary — Aggregate scores for a whole session:
-            - Fetch all messages in the session that have ragas_scores
-            - Compute average scores across all evaluated messages
-            - Return:
-                {
-                  "total_messages":    5,
-                  "evaluated":         5,
-                  "avg_faithfulness":  0.88,
-                  "avg_relevancy":     0.84,
-                  "avg_precision":     0.76,
-                  "avg_overall":       0.83,
-                  "label":             "Good",
-                  "score_history": [   ← per-message scores for a trend chart
-                    {"message_id": "...", "overall_score": 0.91, "created_at": "..."},
-                    ...
-                  ]
-                }
+from core.dependencies import get_db
+from core.exceptions import ErrorHandlingRoute
+from db import crud
+from db.models import ChatSession, Message, MessageEvaluation
+from services.evaluator import compute_overall, score_to_label
 
---- Route 3: GET /papers/{paper_id}/report ---
-Step 4:  GET /papers/{paper_id}/report — Full evaluation report for a paper:
-            - Aggregate RAGAS scores across ALL sessions for this paper
-            - Also return: total questions asked, avg latency, model usage breakdown
-            - This is the "Report Card" for the paper's Q&A quality
-            - Great for demo — shows the RAG system is measurably good
-            - Return:
-                {
-                  "paper_id":           "...",
-                  "total_questions":    12,
-                  "avg_faithfulness":   0.89,
-                  "avg_relevancy":      0.85,
-                  "avg_precision":      0.78,
-                  "avg_overall":        0.84,
-                  "quality_label":      "Good",
-                  "openai_calls":       10,
-                  "groq_calls":         2,     ← shows fallback happened
-                  "avg_latency_ms":     1240
-                }
+router = APIRouter(prefix="/api/v1/evaluation", tags=["Evaluation"], route_class=ErrorHandlingRoute)
 
-NOTE: This report endpoint is perfect to open during the demo interview.
-      It shows measurable proof that your RAG pipeline works well, not just anecdotally.
-"""
 
+def _score_payload(evaluation: MessageEvaluation) -> dict:
+    scores = {"faithfulness": None, "answer_relevancy": None, "context_precision": None,
+              "context_recall": None, "overall_score": None, "label": None,
+              "precision_metric": None, "evaluated_at": None}
+    scores.update(evaluation.scores or {})
+    return {**scores, "message_id": evaluation.message_id, "status": evaluation.status}
+
+
+def _aggregate(messages: list[Message]) -> dict:
+    answers = [message for message in messages if message.role == "assistant"]
+    completed = [message for message in answers if message.evaluation is not None
+                 and message.evaluation.status == "completed" and message.evaluation.scores]
+    def average(key):
+        values = [message.evaluation.scores[key] for message in completed
+                  if message.evaluation.scores.get(key) is not None]
+        return round(sum(values) / len(values), 3) if values else None
+
+    means = {name: average(name) for name in ("faithfulness", "answer_relevancy", "context_precision")}
+    overall = compute_overall(means)
+    statuses = Counter(message.evaluation.status if message.evaluation else "not_scheduled" for message in answers)
+    return {
+        "total_messages": len(messages), "total_answers": len(answers), "evaluated": len(completed),
+        "pending": statuses["pending"], "failed": statuses["failed"], "skipped": statuses["skipped"],
+        "not_scheduled": statuses["not_scheduled"],
+        "avg_faithfulness": means["faithfulness"], "avg_relevancy": means["answer_relevancy"],
+        "avg_precision": means["context_precision"], "avg_overall": overall,
+        "label": score_to_label(overall),
+        "precision_metrics": dict(Counter(message.evaluation.scores.get("precision_metric", "unknown")
+                                           for message in completed)),
+        "score_history": [{"message_id": message.id,
+                           "overall_score": message.evaluation.scores["overall_score"],
+                           "created_at": message.created_at.isoformat()} for message in completed],
+    }
+
+
+@router.get("/messages/{message_id}")
+async def get_message_evaluation(message_id: UUID, db: AsyncSession = Depends(get_db)):
+    message = await db.get(Message, str(message_id))
+    if message is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if message.role != "assistant":
+        raise HTTPException(status_code=400, detail="Only assistant answers can be evaluated")
+    if message.evaluation is None:
+        raise HTTPException(status_code=404, detail="Evaluation was not scheduled for this message")
+    payload = _score_payload(message.evaluation)
+    if message.evaluation.status == "pending":
+        return JSONResponse(status_code=202, content=payload)
+    return payload
+
+
+@router.get("/sessions/{session_id}/summary")
+async def session_summary(session_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    session_id = str(session_id)
+    if await crud.get_session(db, session_id) is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return {"session_id": session_id, **_aggregate(await crud.get_messages_for_session(db, session_id))}
+
+
+@router.get("/papers/{paper_id}/report")
+async def paper_report(paper_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    paper_id = str(paper_id)
+    if await crud.get_paper(db, paper_id) is None:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    messages = list((await db.scalars(select(Message).join(ChatSession)
+        .where(ChatSession.paper_id == paper_id).order_by(Message.created_at, Message.id))).all())
+    answers = [message for message in messages if message.role == "assistant"]
+    latencies = [message.latency_ms for message in answers if message.latency_ms is not None]
+    report = _aggregate(messages)
+    return {"paper_id": paper_id, **report, "quality_label": report["label"],
+            "total_questions": sum(message.role == "user" for message in messages),
+            "avg_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+            # Successful answer model counts, not provider attempts/fallback counters.
+            "model_usage": dict(Counter(message.model_used or "none" for message in answers))}

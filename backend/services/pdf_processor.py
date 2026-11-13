@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 import fitz
+import logfire
 import tiktoken
 
 from core.config import settings
@@ -21,22 +22,24 @@ def extract_text_from_pdf(file_path: str | Path) -> dict[str, Any]:
     Scanned/image-only documents require OCR, which this processor does not do.
     PyMuPDF exceptions for corrupt or missing documents propagate to the caller.
     """
-    with fitz.open(file_path) as document:
-        if not document.is_pdf:
-            raise ValueError("The document is not a PDF")
-        if document.needs_pass:
-            raise ValueError("Password-protected PDFs are not supported")
-        pages = [
-            {"page_num": number, "text": page.get_text()}
-            for number, page in enumerate(document, start=1)
-        ]
-    if not any(clean_text(page["text"]) for page in pages):
-        raise ValueError("PDF has no extractable text; scanned PDFs require OCR")
-    return {
-        "full_text": "\n\n".join(page["text"] for page in pages),
-        "pages": pages,
-        "page_count": len(pages),
-    }
+    with logfire.span("pdf.extract") as span:
+        with fitz.open(file_path) as document:
+            if not document.is_pdf:
+                raise ValueError("The document is not a PDF")
+            if document.needs_pass:
+                raise ValueError("Password-protected PDFs are not supported")
+            pages = [
+                {"page_num": number, "text": page.get_text()}
+                for number, page in enumerate(document, start=1)
+            ]
+        if not any(clean_text(page["text"]) for page in pages):
+            raise ValueError("PDF has no extractable text; scanned PDFs require OCR")
+        span.set_attribute("page_count", len(pages))
+        return {
+            "full_text": "\n\n".join(page["text"] for page in pages),
+            "pages": pages,
+            "page_count": len(pages),
+        }
 
 
 def _make_chunk(text: str, page_nums: list[int], index: int) -> dict[str, Any]:
@@ -132,11 +135,15 @@ def chunk_text_semantic(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def process_pdf(file_path: str | Path) -> list[dict[str, Any]]:
     """Extract a PDF and return its semantic (or fallback fixed) chunks."""
-    return process_pdf_document(file_path)["chunks"]
+    with logfire.span("pdf.process"):
+        return process_pdf_document(file_path)["chunks"]
 
 
 def process_pdf_document(file_path: str | Path) -> dict[str, Any]:
     """Return extracted text, pages, page count and chunks from one PDF read."""
-    document = extract_text_from_pdf(file_path)
-    document["chunks"] = chunk_text_semantic(document["pages"])
-    return document
+    with logfire.span("pdf.process_document") as span:
+        document = extract_text_from_pdf(file_path)
+        document["chunks"] = chunk_text_semantic(document["pages"])
+        span.set_attribute("page_count", document["page_count"])
+        span.set_attribute("chunk_count", len(document["chunks"]))
+        return document
