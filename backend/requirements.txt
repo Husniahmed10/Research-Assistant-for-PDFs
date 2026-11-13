@@ -1,11 +1,12 @@
 # =============================================================================
 # Research Assistant for PDFs — Backend Dependencies
-# Python 3.10+ required
+# Python 3.11 required for the backend + LangGraph dev / Studio runtime
 # Install with: pip install -r requirements.txt
 # =============================================================================
 
 # ── Web Framework ─────────────────────────────────────────────────────────────
-fastapi==0.111.0
+fastapi==0.115.0
+starlette==0.38.6             # Compatible with FastAPI and the Studio API server
 uvicorn[standard]==0.30.1
 python-multipart==0.0.9        # for file uploads
 python-dotenv==1.0.1
@@ -13,6 +14,7 @@ python-dotenv==1.0.1
 # ── Data Validation ───────────────────────────────────────────────────────────
 pydantic==2.7.1
 pydantic-settings==2.3.1
+typing-extensions==4.16.0      # TypedDict schemas on Python 3.11
 
 # ── PDF Processing ────────────────────────────────────────────────────────────
 pymupdf==1.24.5                # fitz — fast PDF text + layout extraction
@@ -27,11 +29,15 @@ tiktoken==0.7.0                # Token counting for chunking
 langchain==0.2.16
 langchain-openai==0.1.23
 langchain-community==0.2.16
-langchain-core==0.2.38         # Must be >=0.2.22 for langgraph 0.1.x
-langgraph==0.1.19              # Agentic workflow graph
+langchain-core==0.2.43         # Compatible with LangChain 0.2, NeMo 0.9 and LangGraph 0.2
+langgraph==0.2.76              # Agent workflow + Studio-compatible runtime
+langgraph-cli[inmem]==0.1.74   # Provides langgraph dev (Python 3.11+)
+langgraph-api==0.0.28          # Pinned to the existing LangChain/NeMo generation
+langgraph-sdk==0.1.53
+langgraph-checkpoint==2.0.15
 
 # ── LangSmith (Agentic Tracing) ───────────────────────────────────────────────
-langsmith==0.1.98
+langsmith==0.1.147
 
 # ── Vector Database ───────────────────────────────────────────────────────────
 pinecone-client==4.1.0         # Pinecone vector DB client
@@ -77,4 +83,3 @@ aiofiles==23.2.1
 # ── Utilities ────────────────────────────────────────────────────────────────
 numpy==1.26.4
 python-jose[cryptography]==3.3.0  # JWT tokens (if adding auth)
-

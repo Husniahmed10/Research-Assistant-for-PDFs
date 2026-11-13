@@ -26,6 +26,7 @@ from db import crud
 from db.database import AsyncSessionLocal
 from db.models import ChatSession, MessageEvaluation
 from services import evaluator
+from services.conversation_memory import extract_user_name, is_name_recall_query
 from services.citations import build_citations
 from utils.text_utils import count_tokens
 
@@ -139,11 +140,15 @@ async def _prepare_state(db: AsyncSession, session_id: str, query: str) -> Agent
     await _require_ready_paper(db, paper_id)
     messages = await crud.get_messages_for_session(db, session_id, limit=4)
     history = [{"role": message.role, "content": message.content} for message in messages]
+    user_name = None
+    if is_name_recall_query(query):
+        user_name = extract_user_name(await crud.get_user_message_texts(db, session_id))
     # Release the read transaction while external model/search calls run.
     await db.rollback()
     initial_state: AgentState = {
         "query": query, "paper_id": paper_id, "session_id": session_id,
         "chat_history": history, "steps": [], "error": "", "citations": [],
+        "user_name": user_name,
         "source_chunks": [], "model_used": "none", "generation_attempts": 0,
         "retry_count": 0, "max_generation_attempts": 2,
         "is_safe": False, "is_output_safe": False, "final_answer": "",

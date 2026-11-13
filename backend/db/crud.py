@@ -199,3 +199,11 @@ async def save_ragas_scores(db: AsyncSession, message_id: str, scores: dict[str,
     row.status = status
     await db.flush()
     return row
+
+
+async def get_user_message_texts(db: AsyncSession, session_id: str) -> list[str]:
+    """Read only this session's user text for targeted conversation recall."""
+    rows = await db.scalars(select(Message.content).where(
+        Message.session_id == session_id, Message.role == "user",
+    ).order_by(Message.created_at, Message.id))
+    return list(rows.all())

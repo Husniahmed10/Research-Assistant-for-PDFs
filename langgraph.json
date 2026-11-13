@@ -1,0 +1,8 @@
+{
+  "python_version": "3.11",
+  "dependencies": ["./backend"],
+  "graphs": {
+    "research_assistant": "./backend/agents/studio.py:studio_agent"
+  },
+  "env": "./backend/.env"
+}

@@ -1,7 +1,8 @@
 """Partial state updates shared by the research-paper agent nodes."""
 
 import operator
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any
+from typing_extensions import TypedDict
 
 
 class AgentState(TypedDict, total=False):
@@ -9,6 +10,8 @@ class AgentState(TypedDict, total=False):
     paper_id: str
     session_id: str
     chat_history: list[dict[str, Any]]
+    user_name: str | None  # User-supplied display name, scoped to this SQL session.
+    studio_context_key: str  # Studio-only scope for checkpointed conversation context.
     is_safe: bool
     rejection_reason: str
     query_type: str
