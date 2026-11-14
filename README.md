@@ -859,13 +859,5 @@ Research-Assistant-for-PDFs/
     langgraph.json         Studio configuration from backend/
 ```
 
-See [backend implementation notes](backend/README.md) for detailed retrieval,
-guardrail, evaluation, tracing and browser SSE behavior. The
-[master plan](Research_Assistant_Master_Plan.md) and
-[four-day backend plan](4_Day_Backend_Implementation_Plan.md) describe the project
-plan; the running API and this README describe implemented behavior.
 
-The included [master plan](Research_Assistant_Master_Plan.md) and
-[four-day plan](4_Day_Backend_Implementation_Plan.md) describe development intent.
-The implemented routes, source and limitations in this README are the reference
-for assessing the delivered project.
+
