@@ -865,21 +865,6 @@ guardrail, evaluation, tracing and browser SSE behavior. The
 [four-day backend plan](4_Day_Backend_Implementation_Plan.md) describe the project
 plan; the running API and this README describe implemented behavior.
 
-## Submission notes
-
-The submission should include both source folders, the frontend lockfile,
-backend requirements, example environment files, Studio configurations and test
-sources. Keep actual `.env`/`.env.local` files, uploaded PDFs, SQLite databases,
-provider credentials, `node_modules/`, `.next/`, model caches, test artifacts and
-local Studio checkpoints out of the source archive/repository. The supplied
-ignore files cover these runtime resources.
-
-Reviewers supply their own provider credentials and initialize a new workspace
-using [Setup](#setup); previously uploaded papers and remote account state are
-not part of the source. If including a demonstration PDF, provide it separately
-with sharing permission. A short demonstration recording can show the
-[workflow](#demonstration-workflow) and the optional Studio graph.
-
 The included [master plan](Research_Assistant_Master_Plan.md) and
 [four-day plan](4_Day_Backend_Implementation_Plan.md) describe development intent.
 The implemented routes, source and limitations in this README are the reference
