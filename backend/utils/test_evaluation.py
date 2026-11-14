@@ -1,6 +1,7 @@
 """Run from backend: python -m utils.test_evaluation (providers mocked)."""
 
 import json
+import builtins
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -17,6 +18,32 @@ from utils.test_chat import ChatAPIFixture
 
 
 class EvaluatorTests(unittest.TestCase):
+    def test_dependency_failure_has_safe_actionable_diagnostics(self):
+        original_import = builtins.__import__
+        def unavailable(name, *args, **kwargs):
+            if name == "ragas":
+                raise ImportError("private package/path details must not leak")
+            return original_import(name, *args, **kwargs)
+        with patch.object(settings, "OPENAI_API_KEY", "test-only"), \
+                patch("builtins.__import__", side_effect=unavailable), \
+                self.assertLogs(evaluator.logger, level="WARNING") as logs:
+            scores = evaluator.evaluate_rag_response("Q", "A", ["C"])
+        self.assertEqual(scores["status"], "failed")
+        self.assertEqual(scores["error_code"], "dependency_error")
+        self.assertIn("restart", scores["error_message"])
+        self.assertNotIn("private package", json.dumps(scores))
+        self.assertNotIn("private package", "".join(logs.output))
+
+    def test_provider_auth_failure_is_distinct_from_dependency_failure(self):
+        class ProviderError(Exception):
+            status_code = 401
+        with patch.object(settings, "OPENAI_API_KEY", "test-only"), \
+                patch("langchain_openai.ChatOpenAI"), patch("langchain_openai.OpenAIEmbeddings"), \
+                patch("ragas.evaluate", side_effect=ProviderError("secret provider response")):
+            scores = evaluator.evaluate_rag_response("Q", "A", ["C"])
+        self.assertEqual(scores["error_code"], "authentication_error")
+        self.assertNotIn("secret provider", json.dumps(scores))
+
     def test_weights_and_labels(self):
         self.assertEqual(evaluator.compute_overall({"faithfulness": 1, "answer_relevancy": 0.8,
                                                   "context_precision": 0.6}), 0.83)

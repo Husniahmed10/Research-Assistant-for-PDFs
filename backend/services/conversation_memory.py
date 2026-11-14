@@ -10,8 +10,9 @@ _RECALL = re.compile(
     r"(?:can|could) you tell me my name|(?:do|can) you remember my name|"
     r"remind me (?:of )?my name)[?!.]*", re.IGNORECASE,
 )
+_GREETING = r"(?:hi|hello|hey|hry)(?:\s+there)?"
 _INTRO = re.compile(
-    r"(?:^|[.!?\n])\s*(?:(?:hi|hello|hey|actually|sorry|please)[,!]?\s+)?"
+    rf"(?:^|[.!?\n])\s*(?:(?:{_GREETING}|actually|sorry|please)(?:[,!]\s*|\s+))?"
     r"(?:my name is|i am|i'm|call me)\s+([^\n.,;:!?]+)", re.IGNORECASE,
 )
 _NOT_NAMES = {
@@ -26,7 +27,7 @@ def _normalize(text: str) -> str:
 
 def is_name_recall_query(query: str) -> bool:
     text = " ".join(_normalize(query).split())
-    text = re.sub(r"^(?:hey|hi|hello)\b(?:\s+there\b)?[,!.\s]*", "", text, count=1, flags=re.IGNORECASE)
+    text = re.sub(rf"^{_GREETING}\b[,!.\s]*", "", text, count=1, flags=re.IGNORECASE)
     return _RECALL.fullmatch(text) is not None
 
 
@@ -35,7 +36,7 @@ def conversation_reply(query: str, name: str | None = None) -> str | None:
     if is_name_recall_query(query):
         return f"Your name is {name}." if name else "I couldn't find your name in this chat's saved messages."
     text = " ".join(_normalize(query).split()).lower().strip(" .!?,")
-    if text in {"hi", "hello", "hey", "hi there", "hello there", "hey there"}:
+    if re.fullmatch(_GREETING, text):
         return "Hi! What would you like to know about the uploaded paper?"
     if text in {"thanks", "thank you", "thanks a lot", "thank you very much"}:
         return "You're welcome! Ask me if you have more questions about the paper."

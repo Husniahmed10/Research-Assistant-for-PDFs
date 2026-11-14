@@ -75,6 +75,8 @@ rank-bm25==0.2.2               # Local BM25 sparse retrieval
 # ── Evaluation (Bonus) ────────────────────────────────────────────────────────
 ragas==0.1.14                  # RAG evaluation metrics (faithfulness, relevance)
 datasets==5.2.0                # Dataset construction for RAGAS
+pyarrow==24.0.0                # datasets >=24; Arrow 26 requires incompatible NumPy 2
+pandas==2.2.3                  # Stable RAGAS 0.1 data-frame support with NumPy 1.26
 
 # ── HTTP & Async ─────────────────────────────────────────────────────────────
 httpx==0.27.0

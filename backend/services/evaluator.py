@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from math import isfinite
 from time import perf_counter
+import logging
 
 import logfire
 from starlette.concurrency import run_in_threadpool
@@ -13,6 +14,33 @@ from db.database import AsyncSessionLocal
 from db import crud
 
 _WEIGHTS = {"faithfulness": 0.40, "answer_relevancy": 0.35, "context_precision": 0.25}
+logger = logging.getLogger(__name__)
+_FAILURES = {
+    "missing_api_key": "Answer-quality evaluation is not configured. Check the evaluation provider credentials.",
+    "invalid_input": "This answer does not have the question and source excerpts needed for evaluation.",
+    "dependency_error": "The answer-quality service could not start. Check the backend evaluation dependencies and restart it.",
+    "authentication_error": "The evaluation provider rejected authorization. Check its API key and permissions.",
+    "rate_limit": "The evaluation provider is rate-limited or its quota is exhausted. Try later or check API billing.",
+    "timeout": "Answer-quality evaluation timed out. The saved answer is still available.",
+    "incomplete_scores": "The evaluator could not produce all quality scores. The saved answer is still available.",
+    "evaluation_error": "Answer-quality evaluation failed. Check the backend evaluation logs; the saved answer is still available.",
+}
+
+
+def _failure_code(error: Exception, stage: str) -> str:
+    if stage == "configuration":
+        return "missing_api_key"
+    if stage == "validation":
+        return "invalid_input"
+    if stage == "dependencies":
+        return "dependency_error"
+    if getattr(error, "status_code", None) in {401, 403}:
+        return "authentication_error"
+    if getattr(error, "status_code", None) == 429:
+        return "rate_limit"
+    if isinstance(error, TimeoutError) or "timeout" in type(error).__name__.lower():
+        return "timeout"
+    return "evaluation_error"
 
 
 def _score(value):
@@ -51,16 +79,20 @@ def evaluate_rag_response(query: str, answer: str, contexts: list[str], ground_t
     started = perf_counter()
     result = {name: None for name in _WEIGHTS}
     result.update(context_recall=None, overall_score=None, label=None, status="failed",
-                  precision_metric="context_precision" if ground_truth is not None else "context_utilization")
+                  precision_metric="context_precision" if ground_truth is not None else "context_utilization",
+                  error_code=None, error_message=None)
+    stage = "configuration"
     try:
         if not settings.OPENAI_API_KEY:
             raise ValueError("Evaluation provider is not configured")
+        stage = "validation"
         if not isinstance(query, str) or not query.strip() or not isinstance(answer, str) or not answer.strip():
             raise ValueError("Question and answer are required")
         if not isinstance(contexts, list) or not contexts or any(not isinstance(c, str) or not c.strip() for c in contexts):
             raise ValueError("Non-empty source contexts are required")
         if ground_truth is not None and (not isinstance(ground_truth, str) or not ground_truth.strip()):
             raise ValueError("Reference answer must be non-empty")
+        stage = "dependencies"
         import ragas
         from datasets import Dataset
         from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -73,6 +105,7 @@ def evaluate_rag_response(query: str, answer: str, contexts: list[str], ground_t
         if ground_truth is not None:
             data["ground_truth"] = [ground_truth]
             metrics.append(context_recall)
+        stage = "evaluation"
         with logfire.span("ragas.evaluate", model="gpt-4o-mini", context_count=len(contexts)):
             evaluated = ragas.evaluate(
                 dataset=Dataset.from_dict(data), metrics=deepcopy(metrics),
@@ -80,7 +113,9 @@ def evaluate_rag_response(query: str, answer: str, contexts: list[str], ground_t
                 embeddings=OpenAIEmbeddings(model="text-embedding-3-small", api_key=settings.OPENAI_API_KEY,
                                             request_timeout=45, max_retries=1),
                 run_config=RunConfig(timeout=60, max_retries=1, max_workers=2),
-                raise_exceptions=False,
+                # Catch provider failures here rather than losing their safe
+                # classification when RAGAS replaces every failed metric by NaN.
+                raise_exceptions=True,
             )
             row = evaluated.to_pandas().iloc[0].to_dict()
             raw = {"faithfulness": _score(row.get("faithfulness")),
@@ -93,9 +128,15 @@ def evaluate_rag_response(query: str, answer: str, contexts: list[str], ground_t
             result["overall_score"] = compute_overall(raw)
             result["label"] = score_to_label(result["overall_score"])
             result["status"] = "completed" if result["overall_score"] is not None else "failed"
-    except Exception:
+            if result["status"] == "failed":
+                result.update(error_code="incomplete_scores", error_message=_FAILURES["incomplete_scores"])
+                logger.warning("RAG evaluation returned incomplete scores")
+    except Exception as exc:
         # Do not expose provider messages, credentials, prompts or source excerpts.
-        result["status"] = "failed"
+        code = _failure_code(exc, stage)
+        result.update(status="failed", error_code=code, error_message=_FAILURES[code])
+        logger.warning("RAG evaluation failed: %s (%s, stage=%s)", code, type(exc).__name__, stage)
+        logfire.warn("RAG evaluation failed", error_code=code, error_type=type(exc).__name__, stage=stage)
     result["evaluated_at"] = datetime.now(timezone.utc).isoformat()
     logfire.info("RAG evaluation finished", status=result["status"], overall_score=result["overall_score"],
                  latency_ms=(perf_counter() - started) * 1000)

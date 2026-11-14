@@ -21,12 +21,13 @@ from pinecone_text.hybrid import hybrid_convex_scale
 from pinecone_text.sparse import BM25Encoder
 
 from core.config import settings
+from core.limits import PINECONE_MAX_METADATA_BYTES
 
 
 _BATCH_SIZE = 100
 # Leave room for request framing beneath the service's 2 MB upsert limit.
 _MAX_BATCH_BYTES = 1_900_000
-_MAX_METADATA_BYTES = 40 * 1024
+_MAX_METADATA_BYTES = PINECONE_MAX_METADATA_BYTES
 
 
 def _bm25_path(paper_id: str | None = None) -> Path:

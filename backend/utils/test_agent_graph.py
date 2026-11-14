@@ -6,7 +6,7 @@ Tests compiled graph routing with model, guardrail and vector-service mocks.
 import copy
 import json
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from langsmith import tracing_context
 
@@ -69,6 +69,24 @@ class GraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["retry_count"], 0)
         self.assertEqual(result["citations"][0]["page_num"], 3)
         self.assertIn("Sources: Page 3", result["final_answer"])
+
+    async def test_real_langchain_tracer_accepts_all_routing_runs(self):
+        # Keep the actual Run schema/callbacks; only transport is mocked so this
+        # catches SDK validation errors hidden by tests with tracing disabled.
+        from langchain_core.tracers.langchain import LangChainTracer
+        transport = Mock()
+        tracer = LangChainTracer(client=transport, project_name="local-test")
+        tracer.raise_error = True
+        tracer.run_inline = True
+        result = await agent.ainvoke(self.state, config={
+            "configurable": {"pinecone_index": object()}, "recursion_limit": 40,
+            "callbacks": [tracer],
+        })
+        self.assertTrue(result["is_output_safe"])
+        self.assertEqual(len(result["steps"]), 10)
+        self.assertIsNotNone(tracer.latest_run)
+        self.assertFalse(tracer.run_map)
+        transport.create_run.assert_called()
 
     async def test_unsafe_input_stops_before_planning(self):
         self.input_check.return_value = False

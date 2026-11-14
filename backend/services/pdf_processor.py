@@ -4,6 +4,7 @@ Call process_pdf through a thread pool from async routes/background pipelines.
 """
 
 from bisect import bisect_left, bisect_right
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -13,7 +14,8 @@ import logfire
 import tiktoken
 
 from core.config import settings
-from utils.text_utils import clean_text, extract_section_headers
+from core.limits import CHUNK_MAX_TEXT_JSON_BYTES, EMBEDDING_MAX_INPUT_TOKENS
+from utils.text_utils import clean_text, count_tokens, extract_section_headers
 
 
 def extract_text_from_pdf(file_path: str | Path) -> dict[str, Any]:
@@ -98,24 +100,50 @@ def chunk_text_fixed(
     return chunks
 
 
-def chunk_text_semantic(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Split at recognized heading lines; keep whole sections across pages.
+def _text_fits_metadata(text: str) -> bool:
+    return len(json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")) <= CHUNK_MAX_TEXT_JSON_BYTES
 
-    Preamble text is retained. page_num is the section's first page; page_nums
-    lists every contributing page for citations. Without headings, use fixed
-    chunking with the configured size and overlap. Sections are not truncated.
+
+def _chunk_budget() -> tuple[int, int]:
+    if settings.CHUNK_SIZE <= 0 or settings.CHUNK_OVERLAP < 0 or settings.CHUNK_OVERLAP >= settings.CHUNK_SIZE:
+        raise ValueError("Require CHUNK_SIZE > 0 and 0 <= CHUNK_OVERLAP < CHUNK_SIZE")
+    size = min(settings.CHUNK_SIZE, EMBEDDING_MAX_INPUT_TOKENS)
+    return size, min(settings.CHUNK_OVERLAP, size - 1)
+
+
+def _bounded_fixed_chunks(pages: list[dict[str, Any]], size: int, overlap: int) -> list[dict[str, Any]]:
+    """Reduce the token window if text is unusually large after JSON encoding."""
+    while True:
+        chunks = chunk_text_fixed(pages, size, min(overlap, size - 1))
+        if all(_text_fits_metadata(chunk["text"]) for chunk in chunks):
+            return chunks
+        if size <= 1:
+            raise ValueError("Chunk text cannot fit the metadata byte budget")
+        size = max(1, size // 2)
+
+
+def chunk_text_semantic(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep short sections whole; split long ones into bounded page windows.
+
+    Both heading-based and fallback chunks respect the configured token budget,
+    the embedding input ceiling and the metadata byte budget. No text is
+    truncated. Split sections carry the actual page of each individual window.
     """
+    size, overlap = _chunk_budget()
     chunks = []
-    lines: list[str] = []
-    page_nums: list[int] = []
+    section_pages: list[dict[str, Any]] = []
     found_header = False
 
     def flush() -> None:
-        text = clean_text("\n".join(lines))
+        text = clean_text("\n".join(page["text"] for page in section_pages))
         if text:
-            chunks.append(_make_chunk(text, page_nums, len(chunks)))
-        lines.clear()
-        page_nums.clear()
+            if count_tokens(text, settings.OPENAI_EMBEDDING_MODEL) <= size and _text_fits_metadata(text):
+                chunks.append(_make_chunk(text, [page["page_num"] for page in section_pages], len(chunks)))
+            else:
+                for chunk in _bounded_fixed_chunks(section_pages, size, overlap):
+                    chunk["chunk_index"] = len(chunks)
+                    chunks.append(chunk)
+        section_pages.clear()
 
     for page in pages:
         for line in page["text"].splitlines():
@@ -124,12 +152,13 @@ def chunk_text_semantic(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if extract_section_headers(line):
                 found_header = True
                 flush()
-            lines.append(line)
-            if page["page_num"] not in page_nums:
-                page_nums.append(page["page_num"])
-    flush()
+            if section_pages and section_pages[-1]["page_num"] == page["page_num"]:
+                section_pages[-1]["text"] += "\n" + line
+            else:
+                section_pages.append({"page_num": page["page_num"], "text": line})
     if not found_header:
-        return chunk_text_fixed(pages, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
+        return _bounded_fixed_chunks(pages, size, overlap)
+    flush()
     return chunks
 
 

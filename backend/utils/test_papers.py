@@ -21,6 +21,7 @@ from core.config import settings
 from core.dependencies import get_db, get_pinecone_index
 from db import crud, database
 from services.summarizer import SUMMARY_KEYS
+from utils.text_utils import count_tokens
 from utils.test_pinecone import FakeIndex
 from starlette.requests import Request
 
@@ -85,6 +86,29 @@ class PaperAPIFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class PaperAPITests(PaperAPIFixture):
+    async def test_long_pdf_upload_is_chunked_before_embedding_and_reaches_ready(self):
+        with fitz.open() as document:
+            for number in range(24):
+                header = "Abstract\n" if number == 0 else ""
+                text = header + ("The experiment uses evidence to compare decision models.\n" * 48)
+                document.new_page().insert_text((50, 50), text, fontsize=10)
+            data = document.tobytes()
+
+        async def bounded_embeddings(chunks):
+            self.assertGreaterEqual(len(chunks), 24)
+            for chunk in chunks:
+                self.assertLessEqual(count_tokens(chunk["text"], settings.OPENAI_EMBEDDING_MODEL), settings.CHUNK_SIZE)
+            return [{**chunk, "embedding": [0.1] * settings.PINECONE_DIMENSION} for chunk in chunks]
+
+        self.embedding_mock.side_effect = bounded_embeddings
+        response = await self.upload(data)
+        self.assertEqual(response.status_code, 202, response.text)
+        paper_id = response.json()["paper_id"]
+        status = (await self.client.get(f"/api/v1/papers/{paper_id}/status")).json()
+        self.assertEqual(status["status"], "ready")
+        self.assertEqual(status["page_count"], 24)
+        self.assertEqual({row["metadata"]["page_num"] for row in self.index.records.values()}, set(range(1, 25)))
+
     async def test_upload_summary_list_and_delete(self):
         response = await self.upload()
         self.assertEqual(response.status_code, 202, response.text)

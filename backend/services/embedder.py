@@ -6,12 +6,13 @@ import logfire
 from openai import AsyncOpenAI
 
 from core.config import settings
+from core.limits import EMBEDDING_MAX_INPUT_TOKENS
 from utils.text_utils import count_tokens
 
 
 client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY, timeout=60.0, max_retries=2)
 _MAX_BATCH_SIZE = 100
-_MAX_INPUT_TOKENS = 8192
+_MAX_INPUT_TOKENS = EMBEDDING_MAX_INPUT_TOKENS
 _MAX_BATCH_TOKENS = 300_000
 
 

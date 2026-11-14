@@ -20,7 +20,8 @@ router = APIRouter(prefix="/api/v1/evaluation", tags=["Evaluation"], route_class
 def _score_payload(evaluation: MessageEvaluation) -> dict:
     scores = {"faithfulness": None, "answer_relevancy": None, "context_precision": None,
               "context_recall": None, "overall_score": None, "label": None,
-              "precision_metric": None, "evaluated_at": None}
+              "precision_metric": None, "evaluated_at": None,
+              "error_code": None, "error_message": None}
     scores.update(evaluation.scores or {})
     return {**scores, "message_id": evaluation.message_id, "status": evaluation.status}
 
