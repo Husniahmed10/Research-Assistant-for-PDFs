@@ -67,6 +67,7 @@ async def process_and_index(paper_id: str, file_path: str, index: Index) -> None
     BackgroundTasks are not durable; a server restart can interrupt this work.
     """
     indexing_started = False
+    stage = "extraction"
     try:
         document = await run_in_threadpool(process_pdf_document, file_path)
         async with AsyncSessionLocal() as db:
@@ -77,10 +78,14 @@ async def process_and_index(paper_id: str, file_path: str, index: Index) -> None
             paper.page_count = document["page_count"]
             await db.commit()
 
+        stage = "summary"
         summary = await generate_summary(document["full_text"])
+        stage = "embedding"
         chunks = await embed_chunks(document["chunks"])
+        stage = "indexing"
         indexing_started = True
         await run_in_threadpool(upsert_chunks, index, chunks, paper_id)
+        stage = "finalization"
         async with AsyncSessionLocal() as db:
             async with db.begin():
                 paper = await crud.get_paper(db, paper_id)
@@ -90,8 +95,8 @@ async def process_and_index(paper_id: str, file_path: str, index: Index) -> None
                 await crud.update_paper_status(db, paper_id, "ready")
     except Exception as exc:
         # Do not include provider errors or document contents in API responses.
-        logfire.error("Paper processing failed", paper_id=paper_id, error_type=type(exc).__name__)
-        logger.error("Paper processing failed for %s", paper_id)
+        logfire.error("Paper processing failed", paper_id=paper_id, stage=stage, error_type=type(exc).__name__)
+        logger.error("Paper processing failed for %s at %s (%s)", paper_id, stage, type(exc).__name__)
         if indexing_started:
             try:
                 await run_in_threadpool(delete_paper_vectors, index, paper_id)

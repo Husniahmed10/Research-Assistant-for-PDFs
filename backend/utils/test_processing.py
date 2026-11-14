@@ -24,6 +24,43 @@ from utils.text_utils import clean_text, count_tokens
 
 
 class PDFTests(unittest.TestCase):
+    def test_large_semantic_sections_are_bounded_and_keep_actual_pages(self):
+        pages = [
+            {"page_num": 1, "text": "Abstract\nA short abstract."},
+            {"page_num": 2, "text": "Introduction\n" + " ".join(f"page2word{i}" for i in range(3000))},
+            {"page_num": 3, "text": " ".join(f"page3word{i}" for i in range(3000)) + "\nConclusion\nFinal result."},
+        ]
+        with patch.object(settings, "CHUNK_SIZE", 512), patch.object(settings, "CHUNK_OVERLAP", 0):
+            chunks = chunk_text_semantic(pages)
+        self.assertGreater(len(chunks), 3)
+        self.assertTrue(all(count_tokens(chunk["text"], settings.OPENAI_EMBEDDING_MODEL) <= 512 for chunk in chunks))
+        self.assertEqual([chunk["chunk_index"] for chunk in chunks], list(range(len(chunks))))
+        self.assertEqual(len({chunk["chunk_id"] for chunk in chunks}), len(chunks))
+        for page_num in (2, 3):
+            fragments = [chunk for chunk in chunks if f"page{page_num}word" in chunk["text"]]
+            self.assertTrue(fragments)
+            self.assertTrue(all(chunk["page_num"] == page_num and chunk["page_nums"] == [page_num] for chunk in fragments))
+            reconstructed = "".join(chunk["text"] for chunk in chunks
+                                    if chunk["page_num"] == page_num and not chunk["text"].startswith("Conclusion"))
+            expected = pages[page_num - 1]["text"].split("\nConclusion")[0]
+            self.assertEqual(reconstructed, clean_text(expected))
+        self.assertEqual(chunks[-1]["text"], "Conclusion Final result.")
+
+    def test_dense_ascii_text_also_respects_metadata_budget(self):
+        # This text fits the embedding token limit but exceeds metadata bytes.
+        text = "abcdefghijklmnopqrstuvwxyz " * 1800
+        for source in (text, "Abstract\n" + text):
+            with self.subTest(has_heading=source.startswith("Abstract")), \
+                    patch.object(settings, "CHUNK_SIZE", 20000), patch.object(settings, "CHUNK_OVERLAP", 0):
+                chunks = chunk_text_semantic([{"page_num": 4, "text": source}])
+            self.assertGreater(len(chunks), 1)
+            self.assertEqual("".join(chunk["text"] for chunk in chunks), clean_text(source))
+            for chunk in chunks:
+                self.assertLessEqual(count_tokens(chunk["text"], settings.OPENAI_EMBEDDING_MODEL), 8192)
+                metadata = {"paper_id": "12345678-1234-1234-1234-123456789012", "text": chunk["text"],
+                            "page_num": chunk["page_num"], "chunk_index": chunk["chunk_index"]}
+                self.assertLessEqual(len(json.dumps(metadata, ensure_ascii=False).encode("utf-8")), 40 * 1024)
+
     def test_real_pdf_sections_and_pages(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "paper.pdf"

@@ -2,6 +2,7 @@
 
 from functools import partial
 
+from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState
@@ -57,7 +58,10 @@ def build_graph(*, input_node=None, retrieval_node=None, citation_node=None, inp
     chain = ["query_analyzer", "query_rewriter", "multi_query", "hyde_generator",
              "retriever", "reranker", "synthesizer", "output_guard"]
     for source, target in zip(chain, chain[1:]):
-        graph.add_conditional_edges(source, partial(_next_or_end, next_node=target), {target: target, END: END})
+        # A bare partial has no __name__. The pinned LangChain tracer cannot
+        # build Run(serialized=None, name=None), so give each routing run a name.
+        route = RunnableLambda(partial(_next_or_end, next_node=target), name=f"after_{source}")
+        graph.add_conditional_edges(source, route, {target: target, END: END})
     graph.add_conditional_edges("output_guard", _after_output, {
         "citation_formatter": "citation_formatter", "synthesizer": "synthesizer", END: END,
     })

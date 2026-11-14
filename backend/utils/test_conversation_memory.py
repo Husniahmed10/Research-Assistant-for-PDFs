@@ -17,6 +17,9 @@ class MemoryTests(unittest.TestCase):
             ("Hi, I am Husni Ahamed. Who wrote this paper?", "Husni Ahamed"),
             ("My name is Alice and what are the results?", "Alice"),
             ("I'm O'Connor. What is the method?", "O'Connor"),
+            ("hry, i am husni ahamed, is this paper really worth reading", "husni ahamed"),
+            ("Hey there, I am Husni Ahamed. What are the results?", "Husni Ahamed"),
+            ("Hi,I am Husni Ahamed, who wrote this?", "Husni Ahamed"),
         ):
             self.assertEqual(extract_user_name([content]), name)
         self.assertEqual(extract_user_name(["My name is Alice", "Actually, my name is Bob."]), "Bob")
@@ -128,6 +131,21 @@ class ConversationAPITests(ChatAPIFixture):
         self.assertEqual(events[-1]["citations"], [])
         self.assertEqual("".join(e["content"] for e in events if e["type"] == "token"), "Your name is Husni Ahamed.")
         self.chat_mock.assert_not_awaited()
+
+    async def test_logged_typo_introduction_is_recalled_through_streaming(self):
+        _, session_id = await self.ready_session()
+        introduction = "hry, i am husni ahamed, is this paper really worth reading"
+        first = await self.client.get(f"/api/v1/chat/sessions/{session_id}/stream",
+                                      params={"query": introduction})
+        self.assertIn('"type": "done"', first.text)
+        before = self.chat_mock.await_count
+        recalled = await self.client.get(f"/api/v1/chat/sessions/{session_id}/stream",
+                                         params={"query": "hi whats my name"})
+        events = [json.loads(line[6:]) for line in recalled.text.splitlines() if line.startswith("data: ")]
+        self.assertEqual(events[-1]["type"], "done", recalled.text)
+        self.assertEqual("".join(event["content"] for event in events if event["type"] == "token"),
+                         "Your name is husni ahamed.")
+        self.assertEqual(self.chat_mock.await_count, before)
 
 
 if __name__ == "__main__":
